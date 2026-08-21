@@ -34,6 +34,7 @@ Compared with `upstream/master` (based on current `upstream/master..master` comm
   - sync consistency fixes for search history merge and reading progress after cloud sync.
   - incremental oplog sync for history and read progress: routine syncs transfer only changes, immune to concurrent-device overwrites and clock skew.
   - Komga server configuration and credentials included in config sync for automatic cross-device setup.
+  - `nhentai` API key included in config sync, with automatic migration from the legacy EH setting payload.
 - Gallery and search UX:
   - multi-tag selection in detail page.
   - client-side filters for Popular and Ranklist pages.
@@ -41,6 +42,8 @@ Compared with `upstream/master` (based on current `upstream/master..master` comm
   - `nhentai` search supports EH/NH mode toggle (non-prefix input works in NH mode), while keeping `nh:` keyword-prefix compatibility and NH tag translation.
   - dedicated `EH` action on `nhentai` details to extract title and search on E-Hentai.
   - `nhentai` details page favorite action and EH-aligned favorite flow.
+  - optional official `nhentai` API v2 mode with richer gallery metadata, comments, related galleries, tag suggestions, remote favorites, and tag blacklist management; the existing parser remains available when no API key is configured.
+  - official `nhentai` ZIP/CBZ and torrent downloads, signed URLs, dynamic CDN configuration, and expanded category/language/page-range search filters.
   - `wnacg` site integration: search, browse, detail, download, local favorites, cloud sync with configurable domain.
   - three-way EH/NH/WN search toggle and `wn:` keyword-prefix support.
   - EH/NH/WN favorites support both mixed insertion and split display with menu switching.
@@ -52,6 +55,7 @@ Compared with `upstream/master` (based on current `upstream/master..master` comm
   - switchable JHenTai, Komga, and PDF reading sources with a shared reader.
   - dedicated PDF library for scanned local PDF files (including Windows rendering via pdfx).
   - Komga library/series/book browsing with local progress states, new-content filtering, added/read/title sorting, card/list/detail layouts, and one-way progress reporting.
+  - Komga source pages reuse the complete JHenTai navigation drawer and consistent light/dark app surfaces.
 - Framework:
   - Flutter upgraded to 3.44.4, fixing dialogs auto-dismissing on iPadOS 26.1+ (flutter/flutter#177992).
 - CI/workflow updates in this fork:
