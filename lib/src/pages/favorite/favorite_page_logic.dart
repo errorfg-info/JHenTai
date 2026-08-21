@@ -102,10 +102,11 @@ class FavoritePageLogic extends BasePageLogic {
     }
 
     FavoriteSortOrderDialogResult? result = await Get.dialog(
-        EHFavoriteSortOrderDialog(
-      init: state.favoriteSortOrder,
-      initMixedMode: state.mixedMode,
-    ));
+      EHFavoriteSortOrderDialog(
+        init: state.favoriteSortOrder,
+        initMixedMode: state.mixedMode,
+      ),
+    );
     if (result == null) {
       return;
     }
@@ -154,8 +155,10 @@ class FavoritePageLogic extends BasePageLogic {
     updateSafely();
 
     try {
-      await ehRequest.requestChangeFavoriteSortOrder(result.sortOrder,
-          parser: EHSpiderParser.galleryPage2GalleryPageInfo);
+      await ehRequest.requestChangeFavoriteSortOrder(
+        result.sortOrder,
+        parser: EHSpiderParser.galleryPage2GalleryPageInfo,
+      );
     } on DioException catch (e) {
       /// handle with domain fronting, manually load more
       if (e.response?.statusCode == 403 && e.response!.redirects.isNotEmpty) {
@@ -231,7 +234,11 @@ class FavoritePageLogic extends BasePageLogic {
       searchConfig: state.searchConfig,
     );
 
-    await Future.wait(nhFavorites.map((g) => tagTranslationService.translateTagsIfNeeded(g.tags)));
+    await Future.wait(
+      nhFavorites.map(
+        (g) => tagTranslationService.translateTagsIfNeeded(g.tags),
+      ),
+    );
 
     state.gallerys = nhFavorites;
     state.prevGid = null;
@@ -257,16 +264,35 @@ class FavoritePageLogic extends BasePageLogic {
     if (state.showNhFavorites && ehRequest.hasNhentaiApiKey) {
       await state.searchConfigInitCompleter.future;
       int pageNo = int.tryParse(nextGid ?? prevGid ?? '') ?? 1;
-      return ehRequest.requestNhFavoritePage(
-        pageNo: pageNo,
-        searchConfig: state.searchConfig,
-      );
+      try {
+        GalleryPageInfo remotePage = await ehRequest.requestNhFavoritePage(
+          pageNo: pageNo,
+          searchConfig: state.searchConfig,
+        );
+        return nhentaiFavoriteService.mergeRemoteFavoritePage(
+          remotePage: remotePage,
+          includeLocalFavorites: pageNo == 1,
+          sortOrder: state.favoriteSortOrder,
+          searchConfig: state.searchConfig,
+        );
+      } catch (e) {
+        if (pageNo != 1) {
+          rethrow;
+        }
+
+        log.warning(
+          'Load native nhentai favorites failed; keeping synced favorites visible',
+          e,
+        );
+        return nhentaiFavoriteService.mergeRemoteFavoritePage(
+          remotePage: GalleryPageInfo(gallerys: const <Gallery>[]),
+          includeLocalFavorites: true,
+          sortOrder: state.favoriteSortOrder,
+          searchConfig: state.searchConfig,
+        );
+      }
     }
-    return super.getGalleryPage(
-      prevGid: prevGid,
-      nextGid: nextGid,
-      seek: seek,
-    );
+    return super.getGalleryPage(prevGid: prevGid, nextGid: nextGid, seek: seek);
   }
 
   Future<void> _loadWnFavorites() async {
@@ -275,7 +301,11 @@ class FavoritePageLogic extends BasePageLogic {
       searchConfig: state.searchConfig,
     );
 
-    await Future.wait(wnFavorites.map((g) => tagTranslationService.translateTagsIfNeeded(g.tags)));
+    await Future.wait(
+      wnFavorites.map(
+        (g) => tagTranslationService.translateTagsIfNeeded(g.tags),
+      ),
+    );
 
     state.gallerys = wnFavorites;
     state.prevGid = null;
@@ -294,7 +324,9 @@ class FavoritePageLogic extends BasePageLogic {
 
   Future<void> _mergeLocalFavoritesForDisplay() async {
     // Check if EH galleries have favoritedTime
-    bool ehHasFavoritedTime = state.gallerys.any((g) => g.favoritedTime != null);
+    bool ehHasFavoritedTime = state.gallerys.any(
+      (g) => g.favoritedTime != null,
+    );
     if (state.gallerys.isNotEmpty && !ehHasFavoritedTime) {
       state.mixedMode = false;
       snack('mixedModeUnavailable'.tr, '');
@@ -316,17 +348,26 @@ class FavoritePageLogic extends BasePageLogic {
       return;
     }
 
-    await Future.wait(localFavorites.map((g) => tagTranslationService.translateTagsIfNeeded(g.tags)));
+    await Future.wait(
+      localFavorites.map(
+        (g) => tagTranslationService.translateTagsIfNeeded(g.tags),
+      ),
+    );
 
     // Remove any previously merged local favorites (identified by NH/WN URL)
     state.gallerys.removeWhere((g) => g.galleryUrl.isNH || g.galleryUrl.isWN);
 
     // Combine and sort descending by the time matching current sort order
-    bool sortByPublishTime = state.favoriteSortOrder == FavoriteSortOrder.publishedTime;
+    bool sortByPublishTime =
+        state.favoriteSortOrder == FavoriteSortOrder.publishedTime;
     List<Gallery> combined = [...state.gallerys, ...localFavorites];
     combined.sort((a, b) {
-      String timeA = sortByPublishTime ? a.publishTime : (a.favoritedTime ?? '');
-      String timeB = sortByPublishTime ? b.publishTime : (b.favoritedTime ?? '');
+      String timeA = sortByPublishTime
+          ? a.publishTime
+          : (a.favoritedTime ?? '');
+      String timeB = sortByPublishTime
+          ? b.publishTime
+          : (b.favoritedTime ?? '');
       return timeB.compareTo(timeA);
     });
 

@@ -18,8 +18,9 @@ class NHentaiFavoriteService
   static const int defaultFavoriteCategoryIndex = 0;
 
   static final DateFormat _displayDateFormat = DateFormat('yyyy-MM-dd HH:mm');
-  static final RegExp _keywordTokenPattern =
-      RegExp(r'(\w+):"([^"]+)"|(\w+):(\S+)|"([^"]+)"|(\S+)');
+  static final RegExp _keywordTokenPattern = RegExp(
+    r'(\w+):"([^"]+)"|(\w+):(\S+)|"([^"]+)"|(\S+)',
+  );
 
   final Map<int, _NHentaiFavoriteEntry> _favoritesByGid =
       <int, _NHentaiFavoriteEntry>{};
@@ -48,8 +49,9 @@ class NHentaiFavoriteService
         continue;
       }
 
-      _NHentaiFavoriteEntry? entry =
-          _NHentaiFavoriteEntry.tryFromJson(item.cast<String, dynamic>());
+      _NHentaiFavoriteEntry? entry = _NHentaiFavoriteEntry.tryFromJson(
+        item.cast<String, dynamic>(),
+      );
       if (entry == null || !entry.gallery.galleryUrl.isNH) {
         continue;
       }
@@ -104,10 +106,11 @@ class NHentaiFavoriteService
     FavoriteSortOrder? sortOrder,
     SearchConfig? searchConfig,
   }) {
-    List<_NHentaiFavoriteEntry> sortedEntries = _favoritesByGid.values
-        .where((entry) => _matchesSearchConfig(entry, searchConfig))
-        .toList()
-      ..sort((a, b) => b.favoritedTime.compareTo(a.favoritedTime));
+    List<_NHentaiFavoriteEntry> sortedEntries =
+        _favoritesByGid.values
+            .where((entry) => _matchesSearchConfig(entry, searchConfig))
+            .toList()
+          ..sort((a, b) => b.favoritedTime.compareTo(a.favoritedTime));
 
     return sortedEntries
         .map(
@@ -115,10 +118,43 @@ class NHentaiFavoriteService
             favoriteTagIndex: entry.favoriteCategoryIndex,
             favoriteTagName: null,
             publishTime: _resolveDisplayTime(entry, sortOrder),
-            favoritedTime: _displayDateFormat.format(entry.favoritedTime.toUtc()),
+            favoritedTime: _displayDateFormat.format(
+              entry.favoritedTime.toUtc(),
+            ),
           ),
         )
         .toList();
+  }
+
+  GalleryPageInfo mergeRemoteFavoritePage({
+    required GalleryPageInfo remotePage,
+    required bool includeLocalFavorites,
+    FavoriteSortOrder? sortOrder,
+    SearchConfig? searchConfig,
+  }) {
+    final List<Gallery> localFavorites = getDisplayFavorites(
+      sortOrder: sortOrder,
+      searchConfig: searchConfig,
+    );
+    final Set<int> localGids = localFavorites
+        .map((Gallery gallery) => gallery.gid)
+        .toSet();
+    final List<Gallery> remoteOnly = remotePage.gallerys
+        .where((Gallery gallery) => !localGids.contains(gallery.gid))
+        .toList(growable: false);
+
+    return GalleryPageInfo(
+      gallerys: <Gallery>[
+        if (includeLocalFavorites) ...localFavorites,
+        ...remoteOnly,
+      ],
+      favoriteSortOrder: sortOrder ?? remotePage.favoriteSortOrder,
+      // The API total does not include local-only synced favorites. Avoid
+      // presenting an incorrect count whenever the union contains local data.
+      totalCount: localFavorites.isEmpty ? remotePage.totalCount : null,
+      prevGid: remotePage.prevGid,
+      nextGid: remotePage.nextGid,
+    );
   }
 
   Gallery _normalizeNhGallerySnapshot(Gallery source) {
@@ -138,7 +174,9 @@ class NHentaiFavoriteService
   }
 
   String _resolveDisplayTime(
-      _NHentaiFavoriteEntry entry, FavoriteSortOrder? sortOrder) {
+    _NHentaiFavoriteEntry entry,
+    FavoriteSortOrder? sortOrder,
+  ) {
     if (sortOrder == FavoriteSortOrder.publishedTime) {
       return _normalizeTimeString(
         entry.gallery.publishTime,
@@ -181,7 +219,9 @@ class NHentaiFavoriteService
   }
 
   bool _matchesSearchConfig(
-      _NHentaiFavoriteEntry entry, SearchConfig? searchConfig) {
+    _NHentaiFavoriteEntry entry,
+    SearchConfig? searchConfig,
+  ) {
     if (searchConfig == null) {
       return true;
     }
@@ -277,8 +317,9 @@ class NHentaiFavoriteService
 
       tokens.add(
         _FavoriteKeywordToken(
-          qualifier:
-              normalizedQualifier?.isEmpty == true ? null : normalizedQualifier,
+          qualifier: normalizedQualifier?.isEmpty == true
+              ? null
+              : normalizedQualifier,
           value: normalizedValue,
         ),
       );
@@ -404,14 +445,15 @@ class _NHentaiFavoriteEntry {
 
     Gallery gallery = Gallery.fromJson(rawGallery.cast<String, dynamic>());
 
-    DateTime? favoritedTime =
-        DateTime.tryParse(map['favoritedTime']?.toString() ?? '');
+    DateTime? favoritedTime = DateTime.tryParse(
+      map['favoritedTime']?.toString() ?? '',
+    );
     favoritedTime ??= DateTime.tryParse(gallery.publishTime);
     favoritedTime ??= DateTime.now();
 
     int favoriteCategoryIndex =
         int.tryParse(map['favoriteCategoryIndex']?.toString() ?? '') ??
-            NHentaiFavoriteService.defaultFavoriteCategoryIndex;
+        NHentaiFavoriteService.defaultFavoriteCategoryIndex;
     if (favoriteCategoryIndex <
             NHentaiFavoriteService.minFavoriteCategoryIndex ||
         favoriteCategoryIndex >
@@ -432,8 +474,5 @@ class _FavoriteKeywordToken {
   final String? qualifier;
   final String value;
 
-  const _FavoriteKeywordToken({
-    required this.qualifier,
-    required this.value,
-  });
+  const _FavoriteKeywordToken({required this.qualifier, required this.value});
 }
