@@ -60,12 +60,12 @@
       },
       "versions": [
         {
-          "version": "8.0.25",
-          "buildVersion": "338",
-          "date": "2026-08-01T21:50:07Z",
-          "localizedDescription": "- 新增 Komga 漫画服务器支持，可浏览媒体库、系列和漫画，并复用 JHenTai 阅读器\n- Komga 书库新增系列/全部书籍切换、未读/阅读中/已读/新添加筛选，以及按添加时间、JHenTai 最近阅读时间或标题排序\n- Komga 书库新增卡片、列表和详细信息三种排列方式，并按版式使用线性或圆形控件显示本地阅读进度与阅读状态\n- Komga 阅读进度以 JHenTai 云同步记录为准，并单向上报至 Komga，避免服务器进度覆盖客户端\n- Komga 页面新增手动历史进度导入按钮，可一次性合并服务器现有进度并继续通过 JHenTai 云同步到其他设备\n- 修复 Komga 书库深色模式下浏览工具栏与页面背景色不一致的问题\n- 阅读器关闭、应用回到前台及 Komga 页面下拉刷新时更积极地同步阅读进度，并合并并发触发避免遗漏最终页码\n- Komga 远程阅读接入网络阅读的预载页数与预载距离设置，翻页和滚动模式均可提前加载后续页面\n- Komga 服务器地址、用户名、密码和 API Key 接入配置同步，可自动同步到其他设备\n- 左侧菜单右下角新增阅读来源切换，可在 JHenTai、Komga 与 PDF 书库之间切换\n- PDF 阅读从本地画廊服务拆分为独立书库，并继续复用阅读器与阅读进度同步\n- 修复发布 CI 的 iOS 构建条件，并避免发布信息自动更新后重复触发全平台构建\n",
-          "downloadURL": "https://github.com/errorfg/JHenTai/releases/download/v8.0.25+338/JHenTai_8.0.25+338.ipa",
-          "size": 15307033
+          "version": "8.0.26",
+          "buildVersion": "339",
+          "date": "2026-08-21T11:19:28Z",
+          "localizedDescription": "- 新增可选的 nhentai API v2 模式：配置 API Key 后通过官方接口获取搜索、详情和动态 CDN 配置；未配置时继续使用原有网页解析及跨站回退逻辑\n- nhentai 详情新增官方评论、相关画廊、标签建议、收藏数量与远程收藏状态展示\n- nhentai 收藏页接入远程收藏列表，详情页支持直接添加或移除官方收藏，并支持标签黑名单切换\n- nhentai 新增官方 ZIP、CBZ 与 Torrent 下载，使用 API 返回的签名链接并支持 CDN 节点轮换\n- nhentai 搜索补充分类、语言、页数范围和命名空间标签过滤\n- nhentai API Key 改为独立配置并纳入云同步，支持保存后自动同步、旧配置迁移和多设备按时间戳合并\n- Komga 页面复用完整的 JHenTai 左侧导航，可直接返回对应主页面，并修复浅色与深色模式下的页面及工具栏背景不一致\n",
+          "downloadURL": "https://github.com/errorfg/JHenTai/releases/download/v8.0.26+339/JHenTai_8.0.26+339.ipa",
+          "size": 15349050
         },
         {
           "version": "8.0.15",
