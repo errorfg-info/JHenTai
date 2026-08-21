@@ -60,12 +60,12 @@
       },
       "versions": [
         {
-          "version": "8.0.26",
-          "buildVersion": "339",
-          "date": "2026-08-21T11:19:28Z",
-          "localizedDescription": "- 新增可选的 nhentai API v2 模式：配置 API Key 后通过官方接口获取搜索、详情和动态 CDN 配置；未配置时继续使用原有网页解析及跨站回退逻辑\n- nhentai 详情新增官方评论、相关画廊、标签建议、收藏数量与远程收藏状态展示\n- nhentai 收藏页接入远程收藏列表，详情页支持直接添加或移除官方收藏，并支持标签黑名单切换\n- nhentai 新增官方 ZIP、CBZ 与 Torrent 下载，使用 API 返回的签名链接并支持 CDN 节点轮换\n- nhentai 搜索补充分类、语言、页数范围和命名空间标签过滤\n- nhentai API Key 改为独立配置并纳入云同步，支持保存后自动同步、旧配置迁移和多设备按时间戳合并\n- Komga 页面复用完整的 JHenTai 左侧导航，可直接返回对应主页面，并修复浅色与深色模式下的页面及工具栏背景不一致\n",
-          "downloadURL": "https://github.com/errorfg/JHenTai/releases/download/v8.0.26+339/JHenTai_8.0.26+339.ipa",
-          "size": 15349050
+          "version": "8.0.27",
+          "buildVersion": "340",
+          "date": "2026-08-21T11:56:09Z",
+          "localizedDescription": "- 修复配置 nhentai API Key 后原生收藏列表替代本地同步收藏，导致已有收藏不显示的问题\n- nhentai 收藏页现在合并本地同步收藏与原生收藏，按 Gallery ID 去重并保留原生分页；原生接口为空或首次请求失败时仍完整显示本地收藏\n- 收藏合并仅作用于显示层，不会改写或清空已有的 nhentai 收藏同步配置\n",
+          "downloadURL": "https://github.com/errorfg/JHenTai/releases/download/v8.0.27+340/JHenTai_8.0.27+340.ipa",
+          "size": 15348378
         },
         {
           "version": "8.0.15",
