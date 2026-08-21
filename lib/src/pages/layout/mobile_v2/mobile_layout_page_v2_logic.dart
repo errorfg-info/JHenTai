@@ -62,7 +62,7 @@ class MobileLayoutPageV2Logic extends GetxController with DoubleTapToRefreshLogi
 
     if (prevIndex != index) {
       MobileLayoutPageV2State.scaffoldKey.currentState?.closeDrawer();
-      update([bodyId]);
+      update([bodyId, tabBarId]);
     }
   }
 

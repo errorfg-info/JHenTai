@@ -47,6 +47,7 @@ import 'package:jhentai/src/setting/komga_setting.dart';
 import 'package:jhentai/src/setting/mouse_setting.dart';
 import 'package:jhentai/src/setting/my_tags_setting.dart';
 import 'package:jhentai/src/setting/network_setting.dart';
+import 'package:jhentai/src/setting/nhentai_api_setting.dart';
 import 'package:jhentai/src/setting/performance_setting.dart';
 import 'package:jhentai/src/setting/preference_setting.dart';
 import 'package:jhentai/src/setting/read_setting.dart';
@@ -107,6 +108,7 @@ List<JHLifeCircleBean> lifeCircleBeans = [
   mouseSetting,
   myTagsSetting,
   networkSetting,
+  nhentaiApiSetting,
   performanceSetting,
   preferenceSetting,
   readSetting,
@@ -128,11 +130,13 @@ void main(List<String> args) async {
 
   WidgetsFlutterBinding.ensureInitialized();
 
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    systemNavigationBarColor: Colors.transparent,
-    systemNavigationBarDividerColor: Colors.transparent,
-    statusBarColor: Colors.transparent,
-  ));
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarDividerColor: Colors.transparent,
+      statusBarColor: Colors.transparent,
+    ),
+  );
 
   lifeCircleBeans = topologicalSort(lifeCircleBeans);
   for (JHLifeCircleBean bean in lifeCircleBeans) {
@@ -151,9 +155,13 @@ class MyApp extends StatelessWidget {
       title: 'JHenTai',
       themeMode: styleSetting.themeMode.value,
       theme: ThemeConfig.theme(
-          styleSetting.lightThemeColor.value, Brightness.light),
-      darkTheme:
-          ThemeConfig.theme(styleSetting.darkThemeColor.value, Brightness.dark),
+        styleSetting.lightThemeColor.value,
+        Brightness.light,
+      ),
+      darkTheme: ThemeConfig.theme(
+        styleSetting.darkThemeColor.value,
+        Brightness.dark,
+      ),
 
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
@@ -172,7 +180,8 @@ class MyApp extends StatelessWidget {
       translations: LocaleText(),
 
       getPages: Routes.pages,
-      initialRoute: securitySetting.enablePasswordAuth.isTrue ||
+      initialRoute:
+          securitySetting.enablePasswordAuth.isTrue ||
               securitySetting.enableBiometricAuth.isTrue
           ? Routes.lock
           : Routes.home,

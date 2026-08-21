@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:intl/intl.dart';
+import 'package:jhentai/src/config/ui_config.dart';
 import 'package:jhentai/src/enum/config_enum.dart';
 import 'package:jhentai/src/model/gallery_image.dart';
 import 'package:jhentai/src/model/komga/komga_browse_models.dart';
@@ -11,16 +12,20 @@ import 'package:jhentai/src/model/komga/komga_models.dart';
 import 'package:jhentai/src/model/read_page_info.dart';
 import 'package:jhentai/src/model/reader_source.dart';
 import 'package:jhentai/src/network/komga_client.dart';
+import 'package:jhentai/src/pages/layout/desktop/desktop_layout_page_logic.dart';
+import 'package:jhentai/src/pages/layout/mobile_v2/mobile_layout_page_v2.dart';
+import 'package:jhentai/src/pages/layout/mobile_v2/mobile_layout_page_v2_logic.dart';
+import 'package:jhentai/src/pages/layout/mobile_v2/mobile_layout_page_v2_state.dart';
 import 'package:jhentai/src/routes/routes.dart';
 import 'package:jhentai/src/service/gallery_download_service.dart';
 import 'package:jhentai/src/service/local_config_service.dart';
 import 'package:jhentai/src/service/read_progress_service.dart';
 import 'package:jhentai/src/service/sync_service.dart';
 import 'package:jhentai/src/setting/komga_setting.dart';
+import 'package:jhentai/src/setting/style_setting.dart';
 import 'package:jhentai/src/utils/route_util.dart';
 import 'package:jhentai/src/utils/toast_util.dart';
 import 'package:jhentai/src/widget/eh_image.dart';
-import 'package:jhentai/src/widget/reader_source_switcher.dart';
 
 class KomgaPage extends StatefulWidget {
   const KomgaPage({super.key, this.clientFactory = KomgaClient.fromSetting});
@@ -36,6 +41,7 @@ class _KomgaPageState extends State<KomgaPage> {
 
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final ScrollController _scrollController = ScrollController();
+  final MobileLayoutPageV2State _drawerState = MobileLayoutPageV2State();
   late final Worker _settingWorker;
   late final VoidCallback _progressListenerDisposer;
   Timer? _progressReloadTimer;
@@ -82,6 +88,7 @@ class _KomgaPageState extends State<KomgaPage> {
     _progressReloadTimer?.cancel();
     _progressListenerDisposer();
     _scrollController.dispose();
+    _drawerState.scrollController.dispose();
     _settingWorker.dispose();
     super.dispose();
   }
@@ -102,21 +109,13 @@ class _KomgaPageState extends State<KomgaPage> {
       },
       child: Scaffold(
         key: _scaffoldKey,
-        drawer: ReaderSourceDrawer(
+        backgroundColor: UIConfig.backGroundColor(context),
+        drawer: MobileLeftDrawer(
+          state: _drawerState,
           currentSource: ReaderSourceType.komga,
           onBeforeSwitch: _prepareSourceSwitch,
-          children: <Widget>[
-            ListTile(
-              leading: const Icon(Icons.settings_outlined),
-              title: Text('komgaSettings'.tr),
-              onTap: _importingProgress
-                  ? null
-                  : () async {
-                      _closeDrawer();
-                      await _openSettings();
-                    },
-            ),
-          ],
+          onDestinationSelected: _openJhentaiDestination,
+          showSelectedDestination: false,
         ),
         appBar: AppBar(
           leadingWidth: isBelowRoot ? 96 : null,
@@ -168,6 +167,7 @@ class _KomgaPageState extends State<KomgaPage> {
               icon: const Icon(Icons.refresh),
             ),
             IconButton(
+              key: const ValueKey<String>('komgaSettingsButton'),
               tooltip: 'komgaSettings'.tr,
               onPressed: _importingProgress ? null : _openSettings,
               icon: const Icon(Icons.settings_outlined),
@@ -296,7 +296,7 @@ class _KomgaPageState extends State<KomgaPage> {
   Widget _buildBrowseToolbar(BuildContext context) {
     return Material(
       key: const ValueKey<String>('komgaBrowseToolbar'),
-      color: Theme.of(context).scaffoldBackgroundColor,
+      type: MaterialType.transparency,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         child: Wrap(
@@ -1799,6 +1799,38 @@ class _KomgaPageState extends State<KomgaPage> {
 
   void _closeDrawer() {
     _scaffoldKey.currentState?.closeDrawer();
+  }
+
+  void _openJhentaiDestination(int index) {
+    final targetName = _drawerState.icons[index].name;
+    _prepareSourceSwitch();
+    Get.offAllNamed<dynamic>(Routes.home);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (styleSetting.isInDesktopLayout &&
+          Get.isRegistered<DesktopLayoutPageLogic>()) {
+        final DesktopLayoutPageLogic layoutLogic =
+            Get.find<DesktopLayoutPageLogic>();
+        final int targetIndex = layoutLogic.state.icons.indexWhere(
+          (icon) => icon.name == targetName,
+        );
+        if (targetIndex >= 0) {
+          layoutLogic.handleTapTabBarButton(targetIndex);
+        }
+        return;
+      }
+
+      if (!Get.isRegistered<MobileLayoutPageV2Logic>()) {
+        return;
+      }
+      final MobileLayoutPageV2Logic layoutLogic =
+          Get.find<MobileLayoutPageV2Logic>();
+      final int targetIndex = layoutLogic.state.icons.indexWhere(
+        (icon) => icon.name == targetName,
+      );
+      if (targetIndex >= 0) {
+        layoutLogic.handleTapTabBarButton(targetIndex);
+      }
+    });
   }
 
   void _prepareSourceSwitch() {

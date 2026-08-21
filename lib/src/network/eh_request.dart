@@ -27,6 +27,7 @@ import 'package:jhentai/src/model/gallery_tag.dart';
 import 'package:jhentai/src/model/gallery_thumbnail.dart';
 import 'package:jhentai/src/model/gallery_url.dart';
 import 'package:jhentai/src/model/gallery_comment.dart';
+import 'package:jhentai/src/model/nhentai_api_models.dart';
 import 'package:jhentai/src/model/search_config.dart';
 import 'package:jhentai/src/network/eh_ip_provider.dart';
 import 'package:jhentai/src/network/eh_timeout_translator.dart';
@@ -34,6 +35,7 @@ import 'package:jhentai/src/pages/ranklist/ranklist_page_state.dart';
 import 'package:jhentai/src/service/isolate_service.dart';
 import 'package:jhentai/src/service/path_service.dart';
 import 'package:jhentai/src/setting/eh_setting.dart';
+import 'package:jhentai/src/setting/nhentai_api_setting.dart';
 import 'package:jhentai/src/setting/preference_setting.dart';
 import 'package:jhentai/src/setting/user_setting.dart';
 import 'package:jhentai/src/service/log.dart';
@@ -44,12 +46,14 @@ import 'package:jhentai/src/utils/string_uril.dart';
 import 'package:http_parser/http_parser.dart' show MediaType;
 import 'package:html/parser.dart' as html_parser;
 import 'package:path/path.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart' show WebViewCookieManager;
 import '../service/jh_service.dart';
 import '../service/local_config_service.dart';
 import '../setting/network_setting.dart';
 import 'eh_cache_manager.dart';
 import 'eh_cookie_manager.dart';
+import 'nhentai_api_support.dart';
 
 EHRequest ehRequest = EHRequest();
 
@@ -62,6 +66,11 @@ class EHRequest with JHLifeCircleBeanErrorCatch implements JHLifeCircleBean {
 
   static const int _nhThumbnailsPerPage = 40;
   final Map<String, _NHentaiGalleryCache> _nhGalleryCache = {};
+  final Map<String, int> _nhImageServerOffsets = {};
+  NHentaiCdnConfig? _nhCdnConfig;
+  Future<NHentaiCdnConfig>? _nhCdnConfigFuture;
+  Set<int>? _nhBlacklistIds;
+  String _nhUserAgent = 'JHenTai/unknown (https://github.com/errorfg/JHenTai)';
 
   static const String _wnDefaultDomain = 'www.wn07.ru';
   static const int _wnThumbnailsPerPage = 40;
@@ -73,16 +82,27 @@ class EHRequest with JHLifeCircleBeanErrorCatch implements JHLifeCircleBean {
 
   @override
   List<JHLifeCircleBean> get initDependencies => super.initDependencies
-    ..addAll([networkSetting, ehSetting, nhentaiTagIdService]);
+    ..addAll([
+      networkSetting,
+      ehSetting,
+      nhentaiApiSetting,
+      nhentaiTagIdService,
+    ]);
 
   @override
   Future<void> doInitBean() async {
-    _dio = Dio(BaseOptions(
-      connectTimeout:
-          Duration(milliseconds: networkSetting.connectTimeout.value),
-      receiveTimeout:
-          Duration(milliseconds: networkSetting.receiveTimeout.value),
-    ));
+    _dio = Dio(
+      BaseOptions(
+        connectTimeout: Duration(
+          milliseconds: networkSetting.connectTimeout.value,
+        ),
+        receiveTimeout: Duration(
+          milliseconds: networkSetting.receiveTimeout.value,
+        ),
+      ),
+    );
+
+    await _initNhUserAgent();
 
     systemProxyAddress = await getSystemProxyAddress();
     await _initProxy();
@@ -107,17 +127,191 @@ class EHRequest with JHLifeCircleBeanErrorCatch implements JHLifeCircleBean {
     ever(networkSetting.receiveTimeout, (_) {
       setReceiveTimeout(networkSetting.receiveTimeout.value);
     });
+    ever(nhentaiApiSetting.apiKey, (_) => resetNhentaiApiSession());
   }
 
   @override
   Future<void> doAfterBeanReady() async {}
 
+  bool get hasNhentaiApiKey => nhentaiApiSetting.apiKey.value.isNotEmpty;
+
+  void resetNhentaiApiSession() {
+    _nhBlacklistIds = null;
+    _nhGalleryCache.removeWhere(
+      (key, _) => key.startsWith('${NHentaiApiSupport.officialHost}::'),
+    );
+  }
+
+  bool supportsNhentaiOfficialApi(GalleryUrl galleryUrl) {
+    return hasNhentaiApiKey &&
+        galleryUrl.isNH &&
+        NHentaiApiSupport.isOfficialHost(
+          galleryUrl.sourceHost ?? NHentaiApiSupport.officialHost,
+        );
+  }
+
+  Future<NHentaiUserProfile> requestNhUserProfile() async {
+    Map<String, dynamic> body = await _requestNhApiJson(
+      NHentaiApiSupport.officialHost,
+      '/user',
+    );
+    return NHentaiUserProfile.fromJson(body);
+  }
+
+  Future<GalleryPageInfo> requestNhFavoritePage({
+    required int pageNo,
+    SearchConfig? searchConfig,
+  }) async {
+    String query = _buildNhQuery(searchConfig);
+    Map<String, dynamic> body = await _requestNhApiJson(
+      NHentaiApiSupport.officialHost,
+      '/favorites',
+      ensureCdnConfig: true,
+      queryParameters: {if (query.isNotEmpty) 'q': query, 'page': pageNo},
+    );
+
+    List<Gallery> gallerys = _parseNhGalleryList(
+      body,
+      sourceHost: NHentaiApiSupport.officialHost,
+    );
+    for (Gallery gallery in gallerys) {
+      gallery.favoriteTagIndex = 0;
+    }
+
+    int totalPages = _tryParseInt(body['num_pages']) ?? 0;
+    int? total = _tryParseInt(body['total']);
+    return GalleryPageInfo(
+      gallerys: gallerys,
+      totalCount: total == null
+          ? null
+          : GalleryCount(
+              type: GalleryCountType.accurate,
+              count: total.toString(),
+            ),
+      prevGid: pageNo > 1 ? (pageNo - 1).toString() : null,
+      nextGid: totalPages == 0
+          ? (gallerys.isEmpty ? null : (pageNo + 1).toString())
+          : (pageNo < totalPages ? (pageNo + 1).toString() : null),
+    );
+  }
+
+  Future<({bool favorited, int? numFavorites})> requestNhSetFavorite(
+    int gid, {
+    required bool favorited,
+  }) async {
+    Map<String, dynamic> body = await _requestNhApiMutation(
+      '/galleries/$gid/favorite',
+      method: favorited ? 'POST' : 'DELETE',
+    );
+    _NHentaiGalleryCache? cache =
+        _nhGalleryCache[_nhCacheKey(NHentaiApiSupport.officialHost, gid)];
+    if (cache != null) {
+      cache.rawGallery['is_favorited'] = body['favorited'] == true;
+      if (body['num_favorites'] != null) {
+        cache.rawGallery['num_favorites'] = body['num_favorites'];
+      }
+    }
+    return (
+      favorited: body['favorited'] == true,
+      numFavorites: _tryParseInt(body['num_favorites']),
+    );
+  }
+
+  Future<NHentaiDownloadLink> requestNhDownload(
+    int gid, {
+    required String format,
+  }) async {
+    if (!const <String>{'zip', 'cbz', 'torrent'}.contains(format)) {
+      throw ArgumentError.value(format, 'format', 'Unsupported nhentai format');
+    }
+    Map<String, dynamic> body = await _requestNhApiMutation(
+      '/galleries/$gid/download',
+      method: 'POST',
+      queryParameters: {'format': format},
+    );
+    NHentaiDownloadLink link = NHentaiDownloadLink.fromJson(body);
+    if (link.url.isEmpty) {
+      throw const FormatException('nhentai returned an empty download URL');
+    }
+    return link;
+  }
+
+  Future<Set<int>> requestNhBlacklistIds({bool refresh = false}) async {
+    if (!refresh && _nhBlacklistIds != null) {
+      return Set<int>.unmodifiable(_nhBlacklistIds!);
+    }
+
+    Map<String, dynamic> body = await _requestNhApiJson(
+      NHentaiApiSupport.officialHost,
+      '/blacklist',
+    );
+    Set<int> ids = ((body['tags'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((tag) => _tryParseInt(tag['id']))
+        .whereType<int>()
+        .toSet();
+    _nhBlacklistIds = ids;
+    return Set<int>.unmodifiable(ids);
+  }
+
+  Future<bool> requestNhToggleBlacklistTag(int tagId) async {
+    Set<int> ids = await requestNhBlacklistIds();
+    bool wasBlacklisted = ids.contains(tagId);
+    await _requestNhApiMutation(
+      '/blacklist',
+      method: 'POST',
+      data: {
+        'added': wasBlacklisted ? <int>[] : <int>[tagId],
+        'removed': wasBlacklisted ? <int>[tagId] : <int>[],
+      },
+    );
+    _nhBlacklistIds = Set<int>.of(ids);
+    if (wasBlacklisted) {
+      _nhBlacklistIds!.remove(tagId);
+    } else {
+      _nhBlacklistIds!.add(tagId);
+    }
+    return !wasBlacklisted;
+  }
+
+  Future<List<GalleryComment>> requestNhComments(
+    int gid, {
+    bool allPages = false,
+  }) async {
+    List<GalleryComment> result = [];
+    int page = 1;
+    int totalPages = 1;
+    do {
+      Map<String, dynamic> body = await _requestNhApiJson(
+        NHentaiApiSupport.officialHost,
+        '/galleries/$gid/comments',
+        queryParameters: {'page': page, 'per_page': 50},
+      );
+      result.addAll(_parseNhComments(body['result']));
+      totalPages = _tryParseInt(body['num_pages']) ?? 1;
+      page++;
+    } while (allPages && page <= totalPages);
+    return result;
+  }
+
+  Future<void> _initNhUserAgent() async {
+    try {
+      final PackageInfo packageInfo = await PackageInfo.fromPlatform();
+      final String version = packageInfo.buildNumber.isEmpty
+          ? packageInfo.version
+          : '${packageInfo.version}+${packageInfo.buildNumber}';
+      _nhUserAgent = 'JHenTai/$version (https://github.com/errorfg/JHenTai)';
+    } catch (_) {
+      // Keep the descriptive fallback when package metadata is unavailable.
+    }
+  }
+
   Future<void> _initProxy() async {
     SocksProxy.initProxy(
       onCreate: (client) =>
           client.badCertificateCallback = (_, String host, __) {
-        return networkSetting.allIPs.contains(host);
-      },
+            return networkSetting.allIPs.contains(host);
+          },
       findProxy: await findProxySettingFunc(() => systemProxyAddress),
     );
   }
@@ -141,46 +335,51 @@ class EHRequest with JHLifeCircleBeanErrorCatch implements JHLifeCircleBean {
 
   void _initDomainFronting() {
     /// domain fronting interceptor
-    _dio.interceptors.add(InterceptorsWrapper(
-      onRequest: (RequestOptions options, RequestInterceptorHandler handler) {
-        if (networkSetting.enableDomainFronting.isFalse) {
-          handler.next(options);
-          return;
-        }
+    _dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (RequestOptions options, RequestInterceptorHandler handler) {
+          if (networkSetting.enableDomainFronting.isFalse) {
+            handler.next(options);
+            return;
+          }
 
-        String rawPath = options.path;
-        String host = options.uri.host;
-        if (!_ehIpProvider.supports(host)) {
-          handler.next(options);
-          return;
-        }
+          String rawPath = options.path;
+          String host = options.uri.host;
+          if (!_ehIpProvider.supports(host)) {
+            handler.next(options);
+            return;
+          }
 
-        String ip = _ehIpProvider.nextIP(host);
-        handler.next(options.copyWith(
-          path: rawPath.replaceFirst(host, ip),
-          headers: {...options.headers, 'host': host},
-          extra: options.extra
-            ..[domainFrontingExtraKey] = {'host': host, 'ip': ip},
-        ));
-      },
-      onError: (DioException e, ErrorInterceptorHandler handler) {
-        if (!e.requestOptions.extra.containsKey(domainFrontingExtraKey)) {
+          String ip = _ehIpProvider.nextIP(host);
+          handler.next(
+            options.copyWith(
+              path: rawPath.replaceFirst(host, ip),
+              headers: {...options.headers, 'host': host},
+              extra: options.extra
+                ..[domainFrontingExtraKey] = {'host': host, 'ip': ip},
+            ),
+          );
+        },
+        onError: (DioException e, ErrorInterceptorHandler handler) {
+          if (!e.requestOptions.extra.containsKey(domainFrontingExtraKey)) {
+            handler.next(e);
+            return;
+          }
+
+          if (e.type == DioExceptionType.connectionTimeout ||
+              e.type == DioExceptionType.badResponse ||
+              e.type == DioExceptionType.connectionError) {
+            String host =
+                e.requestOptions.extra[domainFrontingExtraKey]['host'];
+            String ip = e.requestOptions.extra[domainFrontingExtraKey]['ip'];
+            _ehIpProvider.addUnavailableIp(host, ip);
+            log.info('Add unavailable host-ip: $host-$ip');
+          }
+
           handler.next(e);
-          return;
-        }
-
-        if (e.type == DioExceptionType.connectionTimeout ||
-            e.type == DioExceptionType.badResponse ||
-            e.type == DioExceptionType.connectionError) {
-          String host = e.requestOptions.extra[domainFrontingExtraKey]['host'];
-          String ip = e.requestOptions.extra[domainFrontingExtraKey]['ip'];
-          _ehIpProvider.addUnavailableIp(host, ip);
-          log.info('Add unavailable host-ip: $host-$ip');
-        }
-
-        handler.next(e);
-      },
-    ));
+        },
+      ),
+    );
   }
 
   /// https://github.com/dart-lang/io/issues/83
@@ -219,7 +418,8 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 ''';
       SecurityContext.defaultContext.setTrustedCertificatesBytes(
-          Uint8List.fromList(isrgRootX1.codeUnits));
+        Uint8List.fromList(isrgRootX1.codeUnits),
+      );
     }
   }
 
@@ -240,7 +440,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   }
 
   Future<void> removeCacheByGalleryUrlAndPage(
-      String galleryUrl, int pageIndex) {
+    String galleryUrl,
+    int pageIndex,
+  ) {
     Uri uri = Uri.parse(galleryUrl);
     uri = uri.replace(queryParameters: {'p': pageIndex.toString()});
 
@@ -268,10 +470,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         if (systemProxyAddress.trim().isEmpty) {
           return null;
         }
-        return ProxyConfig(
-          type: ProxyType.http,
-          address: systemProxyAddress,
-        );
+        return ProxyConfig(type: ProxyType.http, address: systemProxyAddress);
       case JProxyType.http:
         return ProxyConfig(
           type: ProxyType.http,
@@ -294,10 +493,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
           password: networkSetting.proxyPassword.value,
         );
       case JProxyType.direct:
-        return ProxyConfig(
-          type: ProxyType.direct,
-          address: '',
-        );
+        return ProxyConfig(type: ProxyType.direct, address: '');
     }
   }
 
@@ -310,7 +506,10 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   }
 
   Future<T> requestLogin<T>(
-      String userName, String passWord, HtmlParser<T> parser) async {
+    String userName,
+    String passWord,
+    HtmlParser<T> parser,
+  ) async {
     Response response = await _postWithErrorHandler(
       EHConsts.EForums,
       options: Options(contentType: Headers.formUrlEncodedContentType),
@@ -331,8 +530,12 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     await removeAllCookies();
     await userSetting.clearBeanConfig();
     if (GetPlatform.isWindows || GetPlatform.isLinux) {
-      Directory directory = Directory(join(pathService.getVisibleDir().path,
-          EHConsts.desktopWebviewDirectoryName));
+      Directory directory = Directory(
+        join(
+          pathService.getVisibleDir().path,
+          EHConsts.desktopWebviewDirectoryName,
+        ),
+      );
       if (await directory.exists()) {
         await directory.delete(recursive: true);
       }
@@ -354,9 +557,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   Future<T> requestForum<T>(int ipbMemberId, HtmlParser<T> parser) async {
     Response response = await _getWithErrorHandler(
       EHConsts.EForums,
-      queryParameters: {
-        'showuser': ipbMemberId,
-      },
+      queryParameters: {'showuser': ipbMemberId},
     );
     return _parseResponse(response, parser);
   }
@@ -452,7 +653,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       data: {
         'method': 'gdata',
         'gidlist': [
-          [gid, token]
+          [gid, token],
         ],
         "namespace": 1,
       },
@@ -476,10 +677,11 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _parseResponse(response, parser);
   }
 
-  Future<T> requestRanklistPage<T>(
-      {required RanklistType ranklistType,
-      required int pageNo,
-      required HtmlParser<T> parser}) async {
+  Future<T> requestRanklistPage<T>({
+    required RanklistType ranklistType,
+    required int pageNo,
+    required HtmlParser<T> parser,
+  }) async {
     int tl;
 
     switch (ranklistType) {
@@ -499,13 +701,20 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         tl = 15;
     }
 
-    Response response =
-        await _getWithErrorHandler('${EHConsts.ERanklist}?tl=$tl&p=$pageNo');
+    Response response = await _getWithErrorHandler(
+      '${EHConsts.ERanklist}?tl=$tl&p=$pageNo',
+    );
     return _parseResponse(response, parser);
   }
 
-  Future<T> requestSubmitRating<T>(int gid, String token, int apiuid,
-      String apikey, int rating, HtmlParser<T> parser) async {
+  Future<T> requestSubmitRating<T>(
+    int gid,
+    String token,
+    int apiuid,
+    String apikey,
+    int rating,
+    HtmlParser<T> parser,
+  ) async {
     Response response = await _postWithErrorHandler(
       EHConsts.EApi,
       data: {
@@ -521,15 +730,15 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   }
 
   Future<T> requestPopupPage<T>(
-      int gid, String token, String act, HtmlParser<T> parser) async {
+    int gid,
+    String token,
+    String act,
+    HtmlParser<T> parser,
+  ) async {
     /// eg: ?gid=2165080&t=725f6a7a58&act=addfav
     Response response = await _getWithErrorHandler(
       EHConsts.EPopup,
-      queryParameters: {
-        'gid': gid,
-        't': token,
-        'act': act,
-      },
+      queryParameters: {'gid': gid, 't': token, 'act': act},
     );
     return _parseResponse(response, parser);
   }
@@ -540,13 +749,16 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _parseResponse(response, parser);
   }
 
-  Future<T> requestChangeFavoriteSortOrder<T>(FavoriteSortOrder sortOrder,
-      {HtmlParser<T>? parser}) async {
+  Future<T> requestChangeFavoriteSortOrder<T>(
+    FavoriteSortOrder sortOrder, {
+    HtmlParser<T>? parser,
+  }) async {
     Response response = await _getWithErrorHandler(
       EHConsts.EFavorite,
       queryParameters: {
-        'inline_set':
-            sortOrder == FavoriteSortOrder.publishedTime ? 'fs_p' : 'fs_f',
+        'inline_set': sortOrder == FavoriteSortOrder.publishedTime
+            ? 'fs_p'
+            : 'fs_f',
       },
     );
 
@@ -555,17 +767,17 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
   /// favcat: the favorite tag index
   Future<T> requestAddFavorite<T>(
-      int gid, String token, int favcat, String note,
-      {HtmlParser<T>? parser}) async {
+    int gid,
+    String token,
+    int favcat,
+    String note, {
+    HtmlParser<T>? parser,
+  }) async {
     /// eg: ?gid=2165080&t=725f6a7a58&act=addfav
     Response response = await _postWithErrorHandler(
       EHConsts.EPopup,
       options: Options(contentType: Headers.formUrlEncodedContentType),
-      queryParameters: {
-        'gid': gid,
-        't': token,
-        'act': 'addfav',
-      },
+      queryParameters: {'gid': gid, 't': token, 'act': 'addfav'},
       data: {
         'favcat': favcat,
         'favnote': note,
@@ -576,17 +788,16 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _parseResponse(response, parser);
   }
 
-  Future<T> requestRemoveFavorite<T>(int gid, String token,
-      {HtmlParser<T>? parser}) async {
+  Future<T> requestRemoveFavorite<T>(
+    int gid,
+    String token, {
+    HtmlParser<T>? parser,
+  }) async {
     /// eg: ?gid=2165080&t=725f6a7a58&act=addfav
     Response response = await _postWithErrorHandler(
       EHConsts.EPopup,
       options: Options(contentType: Headers.formUrlEncodedContentType),
-      queryParameters: {
-        'gid': gid,
-        't': token,
-        'act': 'addfav',
-      },
+      queryParameters: {'gid': gid, 't': token, 'act': 'addfav'},
       data: {
         'favcat': 'favdel',
         'favnote': '',
@@ -605,24 +816,20 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     required HtmlParser<T> parser,
   }) async {
     if (href.startsWith('wn://') || _isWnacgUrl(href)) {
-      return _requestWnImagePage(
-        href: href,
-        parser: parser,
-      );
+      return _requestWnImagePage(href: href, parser: parser);
     }
 
     if (href.startsWith('nh://') || _isNhentaiUrl(href)) {
       return _requestNhImagePage(
         href: href,
         parser: parser,
+        reParse: !useCacheIfAvailable,
       );
     }
 
     Response response = await _getWithErrorHandler(
       href,
-      queryParameters: {
-        if (reloadKey != null) 'nl': reloadKey,
-      },
+      queryParameters: {if (reloadKey != null) 'nl': reloadKey},
       cancelToken: cancelToken,
       options: useCacheIfAvailable
           ? CacheOptions.cacheOptionsIgnoreParams.toOptions()
@@ -632,13 +839,13 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   }
 
   Future<T> requestTorrentPage<T>(
-      int gid, String token, HtmlParser<T> parser) async {
+    int gid,
+    String token,
+    HtmlParser<T> parser,
+  ) async {
     Response response = await _getWithErrorHandler(
       EHConsts.ETorrent,
-      queryParameters: {
-        'gid': gid,
-        't': token,
-      },
+      queryParameters: {'gid': gid, 't': token},
       options: CacheOptions.cacheOptions.toOptions(),
     );
     return _parseResponse(response, parser);
@@ -662,8 +869,10 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _parseResponse(response, parser);
   }
 
-  Future<T> requestMyTagsPage<T>(
-      {int tagSetNo = 1, required HtmlParser<T> parser}) async {
+  Future<T> requestMyTagsPage<T>({
+    int tagSetNo = 1,
+    required HtmlParser<T> parser,
+  }) async {
     Response response = await _getWithErrorHandler(
       EHConsts.EMyTags,
       queryParameters: {'tagset': tagSetNo},
@@ -671,10 +880,11 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _parseResponse(response, parser);
   }
 
-  Future<T> requestStatPage<T>(
-      {required int gid,
-      required String token,
-      required HtmlParser<T> parser}) async {
+  Future<T> requestStatPage<T>({
+    required int gid,
+    required String token,
+    required HtmlParser<T> parser,
+  }) async {
     Response response = await _getWithErrorHandler(
       '${EHConsts.EStat}?gid=$gid&t=$token',
       options: CacheOptions.cacheOptions.toOptions(),
@@ -725,10 +935,11 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _parseResponse(response, parser);
   }
 
-  Future<T> requestDeleteWatchedTag<T>(
-      {required int watchedTagId,
-      int tagSetNo = 1,
-      HtmlParser<T>? parser}) async {
+  Future<T> requestDeleteWatchedTag<T>({
+    required int watchedTagId,
+    int tagSetNo = 1,
+    HtmlParser<T>? parser,
+  }) async {
     Response response;
     try {
       response = await _postWithErrorHandler(
@@ -842,9 +1053,15 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return parser(response.headers, response.data);
   }
 
-  Future<T> voteTag<T>(int gid, String token, int apiuid, String apikey,
-      String tag, bool isVotingUp,
-      {HtmlParser<T>? parser}) async {
+  Future<T> voteTag<T>(
+    int gid,
+    String token,
+    int apiuid,
+    String apikey,
+    String tag,
+    bool isVotingUp, {
+    HtmlParser<T>? parser,
+  }) async {
     Response response = await _postWithErrorHandler(
       EHConsts.EApi,
       data: {
@@ -860,9 +1077,15 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _parseResponse(response, parser);
   }
 
-  Future<T> voteComment<T>(int gid, String token, int apiuid, String apikey,
-      int commentId, bool isVotingUp,
-      {HtmlParser<T>? parser}) async {
+  Future<T> voteComment<T>(
+    int gid,
+    String token,
+    int apiuid,
+    String apikey,
+    int commentId,
+    bool isVotingUp, {
+    HtmlParser<T>? parser,
+  }) async {
     Response response = await _postWithErrorHandler(
       EHConsts.EApi,
       data: {
@@ -879,17 +1102,16 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   }
 
   Future<T> requestTagSuggestion<T>(
-      String keyword, HtmlParser<T> parser) async {
+    String keyword,
+    HtmlParser<T> parser,
+  ) async {
     if (_isNhKeywordSearch(keyword) || _isWnKeywordSearch(keyword)) {
       return <EHRawTag>[] as T;
     }
 
     Response response = await _postWithErrorHandler(
       EHConsts.EApi,
-      data: {
-        'method': "tagsuggest",
-        'text': keyword,
-      },
+      data: {'method': "tagsuggest", 'text': keyword},
     );
     return _parseResponse(response, parser);
   }
@@ -902,9 +1124,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     Response response = await _postWithErrorHandler(
       galleryUrl,
       options: Options(contentType: Headers.formUrlEncodedContentType),
-      data: {
-        'commenttext_new': content,
-      },
+      data: {'commenttext_new': content},
     );
     return _parseResponse(response, parser);
   }
@@ -918,10 +1138,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     Response response = await _postWithErrorHandler(
       galleryUrl,
       options: Options(contentType: Headers.formUrlEncodedContentType),
-      data: {
-        'edit_comment': commentId,
-        'commenttext_edit': content,
-      },
+      data: {'edit_comment': commentId, 'commenttext_edit': content},
     );
     return _parseResponse(response, parser);
   }
@@ -954,8 +1171,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     }
 
     throw EHSiteException(
-        message: 'Look up response error',
-        type: EHSiteExceptionType.internalError);
+      message: 'Look up response error',
+      type: EHSiteExceptionType.internalError,
+    );
   }
 
   Future<T> requestUnlockArchive<T>({
@@ -978,10 +1196,11 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _parseResponse(response, parser);
   }
 
-  Future<T> requestCancelArchive<T>(
-      {required String url,
-      CancelToken? cancelToken,
-      HtmlParser<T>? parser}) async {
+  Future<T> requestCancelArchive<T>({
+    required String url,
+    CancelToken? cancelToken,
+    HtmlParser<T>? parser,
+  }) async {
     Response response = await _postWithErrorHandler(
       url,
       cancelToken: cancelToken,
@@ -1019,9 +1238,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   Future<T> requestResetImageLimit<T>({HtmlParser<T>? parser}) async {
     Response response = await _postWithErrorHandler(
       EHConsts.EHome,
-      data: FormData.fromMap({
-        'reset_imagelimit': 'Reset Limit',
-      }),
+      data: FormData.fromMap({'reset_imagelimit': 'Reset Limit'}),
     );
 
     return _parseResponse(response, parser);
@@ -1086,10 +1303,10 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
   bool _nhCanFallbackRequest(DioException exception) {
     int? statusCode = exception.response?.statusCode;
-    if (statusCode == 404 ||
-        statusCode == 403 ||
-        statusCode == 429 ||
-        (statusCode != null && statusCode >= 500)) {
+    if (NHentaiApiSupport.shouldFallbackResponse(
+      statusCode: statusCode,
+      apiKeyConfigured: hasNhentaiApiKey,
+    )) {
       return true;
     }
 
@@ -1172,7 +1389,8 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         : _nhHostFromSearchConfig(searchConfig);
     preferredHost = _nhNormalizeHost(preferredHost);
 
-    bool isPopularRequest = searchType == SearchType.popular ||
+    bool isPopularRequest =
+        searchType == SearchType.popular ||
         (url?.contains('/popular') ?? false);
     String query = _buildNhQuery(searchConfig);
     String? nhToQuery = _buildNhToQuery(searchConfig, defaultQuery: query);
@@ -1224,6 +1442,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         List<Gallery> gallerys = _parseNhGalleryList(body, sourceHost: host);
         int totalPages = _tryParseInt(body['num_pages']) ?? 0;
         int? perPage = _tryParseInt(body['per_page']);
+        int? total = _tryParseInt(body['total']);
 
         String? next;
         if (totalPages > 0) {
@@ -1233,7 +1452,12 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         }
 
         GalleryCount? totalCount;
-        if (totalPages > 0 && perPage != null) {
+        if (total != null) {
+          totalCount = GalleryCount(
+            type: GalleryCountType.accurate,
+            count: total.toString(),
+          );
+        } else if (totalPages > 0 && perPage != null) {
           totalCount = GalleryCount(
             type: GalleryCountType.accurate,
             count: (totalPages * perPage).toString(),
@@ -1248,11 +1472,12 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         }
 
         return GalleryPageInfo(
-          gallerys: gallerys,
-          totalCount: totalCount,
-          prevGid: pageNo > 1 ? (pageNo - 1).toString() : null,
-          nextGid: next,
-        ) as T;
+              gallerys: gallerys,
+              totalCount: totalCount,
+              prevGid: pageNo > 1 ? (pageNo - 1).toString() : null,
+              nextGid: next,
+            )
+            as T;
       } on DioException catch (e) {
         lastException = e;
         if (index < fallbackHosts.length - 1 && _nhCanFallbackRequest(e)) {
@@ -1277,19 +1502,29 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   }) async {
     GalleryUrl parsedUrl = GalleryUrl.parse(galleryUrl);
     String host = _nhHostFromGalleryUrl(parsedUrl);
-    _NHentaiGalleryCache cache =
-        await _getNhGalleryCache(parsedUrl.gid, host: host);
+    _NHentaiGalleryCache cache = await _getNhGalleryCache(
+      parsedUrl.gid,
+      host: host,
+    );
 
     if (parser == EHSpiderParser.detailPage2GalleryAndDetailAndApikey) {
+      if (supportsNhentaiOfficialApi(cache.galleryUrl)) {
+        try {
+          await requestNhBlacklistIds();
+        } catch (e) {
+          log.debug('Unable to load nhentai blacklist: $e');
+        }
+      }
       return (
-        galleryDetails: _parseNhGalleryDetail(
-          cache.rawGallery,
-          galleryUrl: cache.galleryUrl,
-          pageInfos: cache.pageInfos,
-          mediaId: cache.mediaId,
-        ),
-        apikey: '',
-      ) as T;
+            galleryDetails: _parseNhGalleryDetail(
+              cache.rawGallery,
+              galleryUrl: cache.galleryUrl,
+              pageInfos: cache.pageInfos,
+              mediaId: cache.mediaId,
+            ),
+            apikey: '',
+          )
+          as T;
     }
 
     if (parser == EHSpiderParser.detailPage2Thumbnails) {
@@ -1301,6 +1536,13 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     }
 
     if (parser == EHSpiderParser.detailPage2Comments) {
+      if (supportsNhentaiOfficialApi(cache.galleryUrl)) {
+        return await requestNhComments(
+              cache.gid,
+              allPages: preferenceSetting.showAllComments.isTrue,
+            )
+            as T;
+      }
       return <GalleryComment>[] as T;
     }
 
@@ -1314,6 +1556,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   Future<T> _requestNhImagePage<T>({
     required String href,
     required HtmlParser<T> parser,
+    required bool reParse,
   }) async {
     if (_isNhentaiUrl(href) && parser == EHSpiderParser.imagePage2GalleryUrl) {
       return GalleryUrl.parse(href) as T;
@@ -1347,12 +1590,20 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     }
 
     _NHentaiImageInfo imageInfo = cache.pageInfos[pageNo - 1];
+    String serverOffsetKey =
+        '${cache.galleryUrl.sourceHost ?? host}::${cache.gid}::$pageNo';
+    int serverOffset = _nhImageServerOffsets[serverOffsetKey] ?? 0;
+    if (reParse) {
+      serverOffset++;
+      _nhImageServerOffsets[serverOffsetKey] = serverOffset;
+    }
     String imageUrl = _nhBuildPageImageUrl(
       cache.mediaId,
       pageNo,
       imageInfo.type,
       imagePath: imageInfo.path,
       sourceHost: cache.galleryUrl.sourceHost ?? host,
+      serverOffset: serverOffset,
     );
     GalleryImage image = GalleryImage(
       url: imageUrl,
@@ -1383,6 +1634,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _requestNhApiJson(
       host,
       '/galleries',
+      ensureCdnConfig: true,
       queryParameters: {'page': pageNo},
     );
   }
@@ -1396,29 +1648,96 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _requestNhApiJson(
       host,
       '/search',
-      queryParameters: {
-        'query': query,
-        'sort': sort,
-        'page': pageNo,
-      },
+      ensureCdnConfig: true,
+      queryParameters: {'query': query, 'sort': sort, 'page': pageNo},
     );
   }
 
-  Future<Map<String, dynamic>> _requestNhApiGallery(int gid,
-      {required String host}) {
-    return _requestNhApiJson(host, '/galleries/$gid');
+  Future<Map<String, dynamic>> _requestNhApiGallery(
+    int gid, {
+    required String host,
+  }) {
+    return _requestNhApiJson(
+      host,
+      '/galleries/$gid',
+      ensureCdnConfig: true,
+      queryParameters:
+          supportsNhentaiOfficialApi(
+            GalleryUrl(
+              isEH: true,
+              isNH: true,
+              gid: gid,
+              token: 'nhentai',
+              sourceHost: host,
+            ),
+          )
+          ? {'include': 'comments,related,favorite,suggestions'}
+          : null,
+    );
   }
 
   Future<Map<String, dynamic>> _requestNhApiJson(
     String host,
     String path, {
     Map<String, dynamic>? queryParameters,
+    bool ensureCdnConfig = false,
   }) async {
+    final String normalizedHost = _nhNormalizeHost(host);
+    if (ensureCdnConfig && NHentaiApiSupport.isOfficialHost(normalizedHost)) {
+      await _ensureNhCdnConfig(normalizedHost);
+    }
+
     Response response = await _getWithErrorHandler(
-      'https://$host/api/v2$path',
+      'https://$normalizedHost/api/v2$path',
       queryParameters: queryParameters,
+      options: Options(headers: _nhApiHeaders(normalizedHost)),
     );
 
+    return _decodeNhApiResponse(response);
+  }
+
+  Map<String, String> _nhApiHeaders(String host) {
+    return NHentaiApiSupport.requestHeaders(
+      host: host,
+      userAgent: _nhUserAgent,
+      apiKey: nhentaiApiSetting.apiKey.value,
+    );
+  }
+
+  Future<NHentaiCdnConfig> _ensureNhCdnConfig(String host) async {
+    final NHentaiCdnConfig? cached = _nhCdnConfig;
+    if (cached != null) {
+      return cached;
+    }
+
+    final Future<NHentaiCdnConfig>? inFlight = _nhCdnConfigFuture;
+    if (inFlight != null) {
+      return inFlight;
+    }
+
+    final Future<NHentaiCdnConfig> request = () async {
+      final Response response = await _getWithErrorHandler(
+        'https://$host/api/v2/cdn',
+        options: Options(headers: _nhApiHeaders(host)),
+      );
+      final NHentaiCdnConfig config = NHentaiCdnConfig.fromJson(
+        _decodeNhApiResponse(response),
+      );
+      _nhCdnConfig = config;
+      return config;
+    }();
+    _nhCdnConfigFuture = request;
+
+    try {
+      return await request;
+    } finally {
+      if (identical(_nhCdnConfigFuture, request)) {
+        _nhCdnConfigFuture = null;
+      }
+    }
+  }
+
+  Map<String, dynamic> _decodeNhApiResponse(Response response) {
     dynamic data = response.data;
     if (data is String) {
       data = jsonDecode(data);
@@ -1436,6 +1755,31 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       message: 'Unexpected nhentai response',
       shouldPauseAllDownloadTasks: false,
     );
+  }
+
+  Future<Map<String, dynamic>> _requestNhApiMutation(
+    String path, {
+    required String method,
+    Map<String, dynamic>? queryParameters,
+    dynamic data,
+  }) async {
+    Response response;
+    try {
+      response = await _dio.request(
+        'https://${NHentaiApiSupport.officialHost}/api/v2$path',
+        data: data,
+        queryParameters: queryParameters,
+        options: Options(
+          method: method,
+          headers: _nhApiHeaders(NHentaiApiSupport.officialHost),
+          contentType: Headers.jsonContentType,
+        ),
+      );
+    } on DioException catch (e) {
+      throw _convertExceptionIfGalleryDeleted(e);
+    }
+    _emitEHExceptionIfFailed(response);
+    return _decodeNhApiResponse(response);
   }
 
   Future<GalleryPageInfo> _requestNhToGalleryPage({
@@ -1460,15 +1804,17 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         .map((element) {
           String href =
               element.querySelector('a.cover')?.attributes['href'] ?? '';
-          int gid = int.tryParse(
-                  RegExp(r'/g/(\d+)/').firstMatch(href)?.group(1) ?? '') ??
+          int gid =
+              int.tryParse(
+                RegExp(r'/g/(\d+)/').firstMatch(href)?.group(1) ?? '',
+              ) ??
               0;
           String title =
               element.querySelector('.caption')?.text.trim() ?? '#$gid';
           String coverUrl =
               element.querySelector('img')?.attributes['data-src'] ??
-                  element.querySelector('img')?.attributes['src'] ??
-                  '';
+              element.querySelector('img')?.attributes['src'] ??
+              '';
           coverUrl = _normalizeNhToUrl(coverUrl, host: host);
           String mediaId =
               RegExp(r'/galleries/(\d+)/').firstMatch(coverUrl)?.group(1) ?? '';
@@ -1478,24 +1824,23 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
               .whereType<int>()
               .toList();
 
-          return _parseNhGallery(
-            <String, dynamic>{
-              'id': gid,
-              'media_id': mediaId,
-              'english_title': title,
-              'thumbnail': coverUrl,
-              'tag_ids': tagIds,
-              'inferred_language': _inferLanguageFromTitle(title),
-            },
-            sourceHost: host,
-          );
+          return _parseNhGallery(<String, dynamic>{
+            'id': gid,
+            'media_id': mediaId,
+            'english_title': title,
+            'thumbnail': coverUrl,
+            'tag_ids': tagIds,
+            'inferred_language': _inferLanguageFromTitle(title),
+          }, sourceHost: host);
         })
         .where((gallery) => gallery.gid > 0)
         .toList();
 
-    int currentPage = int.tryParse(
-            document.querySelector('.pagination .page.current')?.text.trim() ??
-                '') ??
+    int currentPage =
+        int.tryParse(
+          document.querySelector('.pagination .page.current')?.text.trim() ??
+              '',
+        ) ??
         pageNo;
     int totalPages = document
         .querySelectorAll('.pagination .page')
@@ -1509,8 +1854,10 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     );
   }
 
-  Future<_NHentaiGalleryCache> _requestNhToGalleryCache(int gid,
-      {required String host}) async {
+  Future<_NHentaiGalleryCache> _requestNhToGalleryCache(
+    int gid, {
+    required String host,
+  }) async {
     Response response = await _getWithErrorHandler(
       'https://$host/g/$gid/',
       options: Options(headers: {'Referer': 'https://$host/'}),
@@ -1527,23 +1874,25 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     if (coverUrl.isNotEmpty) {
       Map<String, dynamic> coverMap =
           (item['cover'] as Map?)?.cast<String, dynamic>() ??
-              <String, dynamic>{};
+          <String, dynamic>{};
       coverMap['path'] = coverUrl;
       item['cover'] = coverMap;
     }
 
-    List<html_dom.Element> thumbImgs =
-        document.querySelectorAll('#thumbnail-container .thumb-container img');
+    List<html_dom.Element> thumbImgs = document.querySelectorAll(
+      '#thumbnail-container .thumb-container img',
+    );
     dynamic pagesRaw = (item['images'] as Map?)?['pages'];
     List<dynamic> pages;
     if (pagesRaw is List) {
       pages = pagesRaw;
     } else if (pagesRaw is Map) {
-      List<int> sortedKeys = pagesRaw.keys
-          .map((k) => int.tryParse(k.toString()))
-          .whereType<int>()
-          .toList()
-        ..sort();
+      List<int> sortedKeys =
+          pagesRaw.keys
+              .map((k) => int.tryParse(k.toString()))
+              .whereType<int>()
+              .toList()
+            ..sort();
       pages = sortedKeys.map((k) => pagesRaw[k.toString()]).toList();
       // Replace the Map with the sorted List so downstream code works
       (item['images'] as Map)['pages'] = pages;
@@ -1560,6 +1909,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       );
       if (thumbUrl.isNotEmpty) {
         page['path'] = _nhToThumb2ImageUrl(thumbUrl);
+        page['thumbnail'] = thumbUrl;
       }
     }
 
@@ -1628,8 +1978,10 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     );
   }
 
-  Future<_NHentaiGalleryCache> _getNhGalleryCache(int gid,
-      {required String host}) async {
+  Future<_NHentaiGalleryCache> _getNhGalleryCache(
+    int gid, {
+    required String host,
+  }) async {
     List<String> fallbackHosts = _nhFallbackHosts(host);
     DioException? lastException;
     EHSiteException? lastSiteException;
@@ -1638,7 +1990,11 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       String currentHost = fallbackHosts[index];
       _NHentaiGalleryCache? cached =
           _nhGalleryCache[_nhCacheKey(currentHost, gid)];
-      if (cached != null && cached.hasFullDetail) {
+      bool needsOfficialIncludes =
+          hasNhentaiApiKey && NHentaiApiSupport.isOfficialHost(currentHost);
+      if (cached != null &&
+          cached.hasFullDetail &&
+          (!needsOfficialIncludes || cached.hasOfficialIncludes)) {
         return cached;
       }
 
@@ -1647,8 +2003,10 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
           return _requestNhToGalleryCache(gid, host: currentHost);
         }
 
-        Map<String, dynamic> body =
-            await _requestNhApiGallery(gid, host: currentHost);
+        Map<String, dynamic> body = await _requestNhApiGallery(
+          gid,
+          host: currentHost,
+        );
         return _cacheNhGallery(body, sourceHost: currentHost);
       } on DioException catch (e) {
         lastException = e;
@@ -1674,18 +2032,25 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         );
   }
 
-  _NHentaiGalleryCache _cacheNhGallery(Map<String, dynamic> item,
-      {required String sourceHost}) {
+  _NHentaiGalleryCache _cacheNhGallery(
+    Map<String, dynamic> item, {
+    required String sourceHost,
+  }) {
     int gid = _tryParseInt(item['public_id']) ?? _parseInt(item['id']);
     String mediaId = item['media_id']?.toString() ?? '';
     List<_NHentaiImageInfo> pageInfos = _parseNhPageInfos(item);
     bool hasFullDetail = _nhHasFullDetail(item);
-    String normalizedHost =
-        sourceHost.startsWith('www.') ? sourceHost.substring(4) : sourceHost;
+    bool hasOfficialIncludes = item.containsKey('is_favorited');
+    String normalizedHost = sourceHost.startsWith('www.')
+        ? sourceHost.substring(4)
+        : sourceHost;
 
     _NHentaiGalleryCache? existing =
         _nhGalleryCache[_nhCacheKey(normalizedHost, gid)];
-    if (existing != null && existing.hasFullDetail && !hasFullDetail) {
+    if (existing != null &&
+        existing.hasFullDetail &&
+        (!hasFullDetail ||
+            (existing.hasOfficialIncludes && !hasOfficialIncludes))) {
       return existing;
     }
 
@@ -1702,13 +2067,16 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       pageInfos: pageInfos,
       rawGallery: item,
       hasFullDetail: hasFullDetail,
+      hasOfficialIncludes: hasOfficialIncludes,
     );
     _nhGalleryCache[_nhCacheKey(normalizedHost, gid)] = cache;
     return cache;
   }
 
-  List<Gallery> _parseNhGalleryList(Map<String, dynamic> body,
-      {required String sourceHost}) {
+  List<Gallery> _parseNhGalleryList(
+    Map<String, dynamic> body, {
+    required String sourceHost,
+  }) {
     List<dynamic> items = (body['result'] as List?) ?? const [];
 
     return items.whereType<Map>().map((item) {
@@ -1720,8 +2088,10 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
   /// Extract cover path from v2 or v1 format
   ({String coverUrl, double? width, double? height}) _parseNhCover(
-      Map<String, dynamic> item, String mediaId,
-      {required String sourceHost}) {
+    Map<String, dynamic> item,
+    String mediaId, {
+    required String sourceHost,
+  }) {
     // v2: cover.path or thumbnail as string
     String? coverPath;
     double? width;
@@ -1742,8 +2112,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       } else if (thumbnail is Map) {
         coverPath = thumbnail['path']?.toString();
         width = _tryParseInt(thumbnail['width'] ?? thumbnail['w'])?.toDouble();
-        height =
-            _tryParseInt(thumbnail['height'] ?? thumbnail['h'])?.toDouble();
+        height = _tryParseInt(
+          thumbnail['height'] ?? thumbnail['h'],
+        )?.toDouble();
       }
     }
 
@@ -1761,10 +2132,10 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     }
 
     // v1 fallback: images.cover.{t,w,h}
-    Map<String, dynamic> imagesMap =
-        ((item['images'] as Map?) ?? const {}).cast<String, dynamic>();
-    Map<String, dynamic> coverMap =
-        ((imagesMap['cover'] as Map?) ?? const {}).cast<String, dynamic>();
+    Map<String, dynamic> imagesMap = ((item['images'] as Map?) ?? const {})
+        .cast<String, dynamic>();
+    Map<String, dynamic> coverMap = ((imagesMap['cover'] as Map?) ?? const {})
+        .cast<String, dynamic>();
     String coverType = (coverMap['t'] ?? 'j').toString();
     return (
       coverUrl: _nhBuildCoverUrl(mediaId, coverType, sourceHost: sourceHost),
@@ -1773,8 +2144,10 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     );
   }
 
-  Gallery _parseNhGallery(Map<String, dynamic> item,
-      {required String sourceHost}) {
+  Gallery _parseNhGallery(
+    Map<String, dynamic> item, {
+    required String sourceHost,
+  }) {
     int gid = _tryParseInt(item['public_id']) ?? _parseInt(item['id']);
     String mediaId = item['media_id']?.toString() ?? '';
 
@@ -1783,11 +2156,12 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     dynamic titleField = item['title'];
     if (titleField is Map) {
       Map<String, dynamic> titleMap = titleField.cast<String, dynamic>();
-      title = (titleMap['pretty'] ??
-              titleMap['english'] ??
-              titleMap['japanese'] ??
-              '#$gid')
-          .toString();
+      title =
+          (titleMap['pretty'] ??
+                  titleMap['english'] ??
+                  titleMap['japanese'] ??
+                  '#$gid')
+              .toString();
     } else {
       title = (item['english_title'] ?? item['japanese_title'] ?? '#$gid')
           .toString();
@@ -1800,7 +2174,8 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     if (uploader != null && uploader.trim().isEmpty) {
       uploader = null;
     }
-    uploader ??= tags['artist']?.firstOrNull?.tagData.tagName ??
+    uploader ??=
+        tags['artist']?.firstOrNull?.tagData.tagName ??
         tags['artist']?.firstOrNull?.tagData.key;
 
     return Gallery(
@@ -1822,13 +2197,14 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
           _tryParseInt(item['num_pages']) ?? _parseNhPageInfos(item).length,
       rating: 0,
       hasRated: false,
-      favoriteTagIndex: null,
+      favoriteTagIndex: item['is_favorited'] == true ? 0 : null,
       favoriteTagName: null,
       language: _findNhLanguage(item),
       uploader: uploader,
       publishTime: _formatNhPublishTime(item['upload_date']),
       isExpunged: false,
       tags: tags,
+      blockedByLocalRules: item['blacklisted'] == true,
     );
   }
 
@@ -1838,26 +2214,44 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     required List<_NHentaiImageInfo> pageInfos,
     required String mediaId,
   }) {
-    Map<String, dynamic> titleMap =
-        ((item['title'] as Map?) ?? const {}).cast<String, dynamic>();
-    String rawTitle = (titleMap['english'] ??
-            titleMap['pretty'] ??
-            titleMap['japanese'] ??
-            '#${galleryUrl.gid}')
-        .toString();
+    Map<String, dynamic> titleMap = ((item['title'] as Map?) ?? const {})
+        .cast<String, dynamic>();
+    String rawTitle =
+        (titleMap['english'] ??
+                titleMap['pretty'] ??
+                titleMap['japanese'] ??
+                '#${galleryUrl.gid}')
+            .toString();
     String? japaneseTitle = titleMap['japanese']?.toString();
 
-    var coverInfo = _parseNhCover(item, mediaId,
-        sourceHost: galleryUrl.sourceHost ?? 'nhentai.net');
+    var coverInfo = _parseNhCover(
+      item,
+      mediaId,
+      sourceHost: galleryUrl.sourceHost ?? 'nhentai.net',
+    );
 
     LinkedHashMap<String, List<GalleryTag>> tags = _parseNhTagsMap(item);
     int pageCount = _tryParseInt(item['num_pages']) ?? pageInfos.length;
 
-    int thumbnailsPageCount =
-        pageCount == 0 ? 1 : (pageCount / _nhThumbnailsPerPage).ceil();
+    int thumbnailsPageCount = pageCount == 0
+        ? 1
+        : (pageCount / _nhThumbnailsPerPage).ceil();
     if (thumbnailsPageCount < 1) {
       thumbnailsPageCount = 1;
     }
+
+    List<GalleryComment> comments = _parseNhComments(item['comments']);
+    List<Gallery> relatedGallerys = _parseNhGalleryList({
+      'result': (item['related'] as List?) ?? const [],
+    }, sourceHost: galleryUrl.sourceHost ?? NHentaiApiSupport.officialHost);
+    List<NHentaiTagSuggestion> suggestions = _parseNhTagSuggestions(
+      item['suggestions'],
+    );
+    int suggestionCount = _parseNhTagSuggestionCount(item['suggestions']);
+    if (suggestionCount < suggestions.length) {
+      suggestionCount = suggestions.length;
+    }
+    bool hasOfficialFeatures = supportsNhentaiOfficialApi(galleryUrl);
 
     return GalleryDetail(
       galleryUrl: galleryUrl,
@@ -1876,7 +2270,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       realRating: 0,
       hasRated: false,
       ratingCount: 0,
-      favoriteTagIndex: null,
+      favoriteTagIndex: item['is_favorited'] == true ? 0 : null,
       favoriteTagName: null,
       favoriteCount: _tryParseInt(item['num_favorites']) ?? 0,
       language: _findNhLanguage(item) ?? '',
@@ -1885,7 +2279,8 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         if (uploader != null && uploader.trim().isEmpty) {
           uploader = null;
         }
-        uploader ??= tags['artist']?.firstOrNull?.tagData.tagName ??
+        uploader ??=
+            tags['artist']?.firstOrNull?.tagData.tagName ??
             tags['artist']?.firstOrNull?.tagData.key;
         return uploader;
       }(),
@@ -1893,18 +2288,88 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       isExpunged: false,
       tags: tags,
       size: '$pageCount pages',
-      torrentCount: '0',
-      torrentPageUrl: '',
-      archivePageUrl: '',
+      torrentCount: hasOfficialFeatures ? '1' : '0',
+      torrentPageUrl: hasOfficialFeatures
+          ? 'https://${NHentaiApiSupport.officialHost}/api/v2/galleries/${galleryUrl.gid}/download?format=torrent'
+          : '',
+      archivePageUrl: hasOfficialFeatures
+          ? 'https://${NHentaiApiSupport.officialHost}/api/v2/galleries/${galleryUrl.gid}/download'
+          : '',
       parentGalleryUrl: null,
       childrenGallerys: const [],
-      comments: const [],
+      comments: comments,
+      commentCount: _tryParseInt(item['comment_count']) ?? comments.length,
+      relatedGallerys: relatedGallerys,
+      nhentaiTagSuggestions: suggestions,
+      nhentaiTagSuggestionCount: suggestionCount,
       thumbnails: _buildNhThumbnails(
-          _nhGalleryCache[
-              _nhCacheKey(_nhHostFromGalleryUrl(galleryUrl), galleryUrl.gid)]!,
-          0),
+        _nhGalleryCache[_nhCacheKey(
+          _nhHostFromGalleryUrl(galleryUrl),
+          galleryUrl.gid,
+        )]!,
+        0,
+      ),
       thumbnailsPageCount: thumbnailsPageCount,
     );
+  }
+
+  List<GalleryComment> _parseNhComments(dynamic rawComments) {
+    List<dynamic> items = rawComments is List ? rawComments : const [];
+    return items.whereType<Map>().map((raw) {
+      Map<String, dynamic> comment = raw.cast<String, dynamic>();
+      Map<String, dynamic> poster = ((comment['poster'] as Map?) ?? const {})
+          .cast<String, dynamic>();
+      html_dom.Element content = html_dom.Element.tag('div');
+      List<String> lines = (comment['body']?.toString() ?? '').split('\n');
+      for (int index = 0; index < lines.length; index++) {
+        if (index > 0) {
+          content.append(html_dom.Element.tag('br'));
+        }
+        content.append(html_dom.Text(lines[index]));
+      }
+      return GalleryComment(
+        id: _tryParseInt(comment['id']) ?? 0,
+        username: poster['username']?.toString(),
+        userId: _tryParseInt(poster['id']),
+        score: '',
+        scoreDetails: const [],
+        content: content,
+        time: _formatNhPublishTime(comment['post_date']),
+        fromMe: false,
+        votedUp: false,
+        votedDown: false,
+        showScore: false,
+      );
+    }).toList();
+  }
+
+  List<NHentaiTagSuggestion> _parseNhTagSuggestions(dynamic rawSuggestions) {
+    if (rawSuggestions is! Map) {
+      return const [];
+    }
+    Map<String, dynamic> bundle = rawSuggestions.cast<String, dynamic>();
+    Map<String, NHentaiTagSuggestion> byId = {};
+    for (String field in const <String>['trending', 'active', 'mine']) {
+      for (Map raw in ((bundle[field] as List?) ?? const []).whereType<Map>()) {
+        NHentaiTagSuggestion suggestion = NHentaiTagSuggestion.fromJson(
+          raw.cast<String, dynamic>(),
+        );
+        if (suggestion.id.isNotEmpty) {
+          byId.putIfAbsent(suggestion.id, () => suggestion);
+        }
+      }
+    }
+    return byId.values.toList();
+  }
+
+  int _parseNhTagSuggestionCount(dynamic rawSuggestions) {
+    if (rawSuggestions is! Map || rawSuggestions['counts'] is! Map) {
+      return 0;
+    }
+    Map counts = rawSuggestions['counts'] as Map;
+    return const <String>['trending', 'active', 'declined', 'hidden']
+        .map((field) => _tryParseInt(counts[field]) ?? 0)
+        .fold(0, (sum, count) => sum + count);
   }
 
   String _buildNhQuery(SearchConfig? searchConfig) {
@@ -1939,11 +2404,38 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       parts.add(_formatNhField('language', language));
     }
 
+    Map<String, bool> categories = {
+      'doujinshi': searchConfig.includeDoujinshi,
+      'manga': searchConfig.includeManga,
+      'artist cg': searchConfig.includeArtistCG,
+      'game cg': searchConfig.includeGameCg,
+      'western': searchConfig.includeWestern,
+      'non-h': searchConfig.includeNonH,
+      'image set': searchConfig.includeImageSet,
+      'cosplay': searchConfig.includeCosplay,
+      'asian porn': searchConfig.includeAsianPorn,
+      'misc': searchConfig.includeMisc,
+    };
+    for (MapEntry<String, bool> category in categories.entries) {
+      if (!category.value) {
+        parts.add(_formatNhField('category', category.key, negative: '-'));
+      }
+    }
+
+    if (searchConfig.pageAtLeast != null) {
+      parts.add('pages:>=${searchConfig.pageAtLeast}');
+    }
+    if (searchConfig.pageAtMost != null) {
+      parts.add('pages:<=${searchConfig.pageAtMost}');
+    }
+
     return parts.join(' ').trim();
   }
 
-  String? _buildNhToQuery(SearchConfig? searchConfig,
-      {required String defaultQuery}) {
+  String? _buildNhToQuery(
+    SearchConfig? searchConfig, {
+    required String defaultQuery,
+  }) {
     if (defaultQuery.isEmpty) {
       return '';
     }
@@ -2001,9 +2493,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     }
 
     List<String> tokens = [];
-    Iterable<RegExpMatch> matches =
-        RegExp(r'(-?)(\w+):"([^"]+)"|(-?)(\w+):(\S+)|"([^"]+)"|(\S+)')
-            .allMatches(keyword);
+    Iterable<RegExpMatch> matches = RegExp(
+      r'(-?)(\w+):"([^"]+)"|(-?)(\w+):(\S+)|"([^"]+)"|(\S+)',
+    ).allMatches(keyword);
 
     for (RegExpMatch match in matches) {
       String negative = (match.group(1) ?? match.group(4)) == '-' ? '-' : '';
@@ -2068,9 +2560,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     }
 
     List<String> tokens = [];
-    Iterable<RegExpMatch> matches =
-        RegExp(r'(-?)(\w+):"([^"]+)"|(-?)(\w+):(\S+)|"([^"]+)"|(\S+)')
-            .allMatches(keyword);
+    Iterable<RegExpMatch> matches = RegExp(
+      r'(-?)(\w+):"([^"]+)"|(-?)(\w+):(\S+)|"([^"]+)"|(\S+)',
+    ).allMatches(keyword);
 
     for (RegExpMatch match in matches) {
       String negative = (match.group(1) ?? match.group(4)) == '-' ? '-' : '';
@@ -2102,8 +2594,11 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return tokens.join(' ').trim();
   }
 
-  String _formatNhField(String namespace, String value,
-      {String negative = ''}) {
+  String _formatNhField(
+    String namespace,
+    String value, {
+    String negative = '',
+  }) {
     return '$negative$namespace:${_quoteNhValue(value)}';
   }
 
@@ -2141,30 +2636,35 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         return v2Pages.whereType<Map>().map((raw) {
           Map<String, dynamic> page = raw.cast<String, dynamic>();
           return _NHentaiImageInfo(
-            type: _nhInferTypeFromPath(page['path']?.toString()) ??
+            type:
+                _nhInferTypeFromPath(page['path']?.toString()) ??
                 (page['t'] ?? 'j').toString(),
             width: _tryParseInt(page['width'] ?? page['w']),
             height: _tryParseInt(page['height'] ?? page['h']),
             path: page['path']?.toString(),
+            thumbnailPath: page['thumbnail']?.toString(),
+            thumbnailWidth: _tryParseInt(page['thumbnail_width']),
+            thumbnailHeight: _tryParseInt(page['thumbnail_height']),
           );
         }).toList();
       }
     }
 
     // v1 format: images.pages (List or Map keyed by page number)
-    Map<String, dynamic> images =
-        ((item['images'] as Map?) ?? const {}).cast<String, dynamic>();
+    Map<String, dynamic> images = ((item['images'] as Map?) ?? const {})
+        .cast<String, dynamic>();
     dynamic pagesRaw = images['pages'];
     List<dynamic> pages;
     if (pagesRaw is List) {
       pages = pagesRaw;
     } else if (pagesRaw is Map) {
       // nhentai.to may return pages as {"2":{...},"3":{...}} instead of [{...},{...}]
-      List<int> sortedKeys = pagesRaw.keys
-          .map((k) => int.tryParse(k.toString()))
-          .whereType<int>()
-          .toList()
-        ..sort();
+      List<int> sortedKeys =
+          pagesRaw.keys
+              .map((k) => int.tryParse(k.toString()))
+              .whereType<int>()
+              .toList()
+            ..sort();
       pages = sortedKeys.map((k) => pagesRaw[k.toString()]).toList();
     } else {
       pages = const [];
@@ -2176,12 +2676,17 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         width: _tryParseInt(page['w']),
         height: _tryParseInt(page['h']),
         path: page['path']?.toString(),
+        thumbnailPath: page['thumbnail']?.toString(),
+        thumbnailWidth: _tryParseInt(page['thumbnail_width']),
+        thumbnailHeight: _tryParseInt(page['thumbnail_height']),
       );
     }).toList();
   }
 
   List<GalleryThumbnail> _buildNhThumbnails(
-      _NHentaiGalleryCache cache, int thumbnailsPageIndex) {
+    _NHentaiGalleryCache cache,
+    int thumbnailsPageIndex,
+  ) {
     int imageCount = cache.pageInfos.length;
     if (imageCount == 0) {
       return const [];
@@ -2204,28 +2709,33 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     for (int i = start; i < end; i++) {
       int pageNo = i + 1;
       _NHentaiImageInfo imageInfo = cache.pageInfos[i];
-      thumbnails.add(GalleryThumbnail(
-        href:
-            'nh://${cache.galleryUrl.sourceHost ?? 'nhentai.net'}/${cache.gid}/$pageNo',
-        isLarge: true,
-        thumbUrl: _nhBuildPageThumbnailUrl(
-          cache.mediaId,
-          pageNo,
-          imageInfo.type,
-          imagePath: imageInfo.path,
-          sourceHost: cache.galleryUrl.sourceHost ?? 'nhentai.net',
+      thumbnails.add(
+        GalleryThumbnail(
+          href:
+              'nh://${cache.galleryUrl.sourceHost ?? 'nhentai.net'}/${cache.gid}/$pageNo',
+          isLarge: true,
+          thumbUrl: _nhBuildPageThumbnailUrl(
+            cache.mediaId,
+            pageNo,
+            imageInfo.type,
+            thumbnailPath: imageInfo.thumbnailPath,
+            sourceHost: cache.galleryUrl.sourceHost ?? 'nhentai.net',
+          ),
+          thumbWidth: (imageInfo.thumbnailWidth ?? imageInfo.width)?.toDouble(),
+          thumbHeight: (imageInfo.thumbnailHeight ?? imageInfo.height)
+              ?.toDouble(),
+          originImageHash: '${cache.mediaId}-$pageNo',
         ),
-        thumbWidth: imageInfo.width?.toDouble(),
-        thumbHeight: imageInfo.height?.toDouble(),
-        originImageHash: '${cache.mediaId}-$pageNo',
-      ));
+      );
     }
 
     return thumbnails;
   }
 
   DetailPageInfo _buildNhDetailPageInfo(
-      _NHentaiGalleryCache cache, int thumbnailsPageIndex) {
+    _NHentaiGalleryCache cache,
+    int thumbnailsPageIndex,
+  ) {
     int imageCount = cache.pageInfos.length;
     if (imageCount == 0) {
       return const DetailPageInfo(
@@ -2316,7 +2826,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
   String? _inferLanguageFromTitle(String title) {
     String lower = title.toLowerCase();
-    if (lower.contains('[chinese]') || lower.contains('[中国翻訳]') || lower.contains('[中国語]')) {
+    if (lower.contains('[chinese]') ||
+        lower.contains('[中国翻訳]') ||
+        lower.contains('[中国語]')) {
       return 'chinese';
     }
     if (lower.contains('[english]')) {
@@ -2332,7 +2844,8 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   }
 
   LinkedHashMap<String, List<GalleryTag>> _parseNhTagsMap(
-      Map<String, dynamic> item) {
+    Map<String, dynamic> item,
+  ) {
     LinkedHashMap<String, List<GalleryTag>> result = LinkedHashMap();
     List<dynamic> rawTags = (item['tags'] as List?) ?? const [];
 
@@ -2352,14 +2865,19 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
         continue;
       }
 
-      String namespace =
-          _normalizeNhTagNamespace(tagMap['type']?.toString() ?? 'tag');
-      result.putIfAbsent(namespace, () => []).add(
+      String namespace = _normalizeNhTagNamespace(
+        tagMap['type']?.toString() ?? 'tag',
+      );
+      int? nhentaiId = _tryParseInt(tagMap['id']);
+      result
+          .putIfAbsent(namespace, () => [])
+          .add(
             GalleryTag(
-              tagData: TagData(
-                namespace: namespace,
-                key: name,
-              ),
+              tagData: TagData(namespace: namespace, key: name),
+              nhentaiId: nhentaiId,
+              nhentaiBlacklisted:
+                  nhentaiId != null &&
+                  (_nhBlacklistIds?.contains(nhentaiId) ?? false),
             ),
           );
     }
@@ -2457,12 +2975,29 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       return '';
     }
 
-    DateTime utc =
-        DateTime.fromMillisecondsSinceEpoch(seconds * 1000, isUtc: true);
+    DateTime utc = DateTime.fromMillisecondsSinceEpoch(
+      seconds * 1000,
+      isUtc: true,
+    );
     return DateFormat('yyyy-MM-dd HH:mm').format(utc);
   }
 
-  String _nhResolvePath(String path, {required String cdnHost}) {
+  String _nhResolvePath(
+    String path, {
+    required String sourceHost,
+    required bool thumbnail,
+    int serverOffset = 0,
+  }) {
+    if (NHentaiApiSupport.isOfficialHost(sourceHost)) {
+      final NHentaiCdnConfig? cdnConfig = _nhCdnConfig;
+      if (cdnConfig == null) {
+        throw StateError('nhentai CDN config has not been loaded');
+      }
+      return thumbnail
+          ? cdnConfig.resolveThumbnailPath(path, serverOffset: serverOffset)
+          : cdnConfig.resolveImagePath(path, serverOffset: serverOffset);
+    }
+
     if (path.startsWith('https://') || path.startsWith('http://')) {
       return path;
     }
@@ -2470,47 +3005,72 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       return 'https:$path';
     }
     String normalized = path.startsWith('/') ? path.substring(1) : path;
+    final String cdnHost = _nhCdnHost(
+      sourceHost,
+      prefix: thumbnail ? 't1' : 'i1',
+    );
     return 'https://$cdnHost/$normalized';
   }
 
-  String _nhBuildCoverUrl(String mediaId, String type,
-      {String? coverPath, required String sourceHost}) {
+  String _nhBuildCoverUrl(
+    String mediaId,
+    String type, {
+    String? coverPath,
+    required String sourceHost,
+  }) {
     if (coverPath != null && coverPath.isNotEmpty) {
+      return _nhResolvePath(coverPath, sourceHost: sourceHost, thumbnail: true);
+    }
+    return _nhResolvePath(
+      'galleries/$mediaId/cover.${_nhType2Ext(type)}',
+      sourceHost: sourceHost,
+      thumbnail: true,
+    );
+  }
+
+  String _nhBuildPageThumbnailUrl(
+    String mediaId,
+    int pageNo,
+    String type, {
+    String? thumbnailPath,
+    required String sourceHost,
+  }) {
+    if (thumbnailPath != null && thumbnailPath.isNotEmpty) {
       return _nhResolvePath(
-        coverPath,
-        cdnHost: _nhCdnHost(sourceHost, prefix: 't1'),
+        thumbnailPath,
+        sourceHost: sourceHost,
+        thumbnail: true,
       );
     }
-    return 'https://${_nhCdnHost(sourceHost, prefix: 't1')}/galleries/$mediaId/cover.${_nhType2Ext(type)}';
+    return _nhResolvePath(
+      'galleries/$mediaId/${pageNo}t.${_nhType2Ext(type)}',
+      sourceHost: sourceHost,
+      thumbnail: true,
+    );
   }
 
-  String _nhBuildPageThumbnailUrl(String mediaId, int pageNo, String type,
-      {String? imagePath, required String sourceHost}) {
-    if (imagePath != null && imagePath.isNotEmpty) {
-      // Convert image path to thumbnail: insert 't' before extension
-      // e.g. /galleries/123/1.jpg → /galleries/123/1t.jpg
-      // or https://cdn/galleries/123/1.jpg → https://cdn/galleries/123/1t.jpg
-      String thumb = imagePath;
-      int dotIndex = thumb.lastIndexOf('.');
-      if (dotIndex > 0) {
-        thumb =
-            '${thumb.substring(0, dotIndex)}t${thumb.substring(dotIndex)}';
-      }
-      return _nhResolvePath(thumb,
-          cdnHost: _nhCdnHost(sourceHost, prefix: 't1'));
-    }
-    return 'https://${_nhCdnHost(sourceHost, prefix: 't1')}/galleries/$mediaId/${pageNo}t.${_nhType2Ext(type)}';
-  }
-
-  String _nhBuildPageImageUrl(String mediaId, int pageNo, String type,
-      {String? imagePath, required String sourceHost}) {
+  String _nhBuildPageImageUrl(
+    String mediaId,
+    int pageNo,
+    String type, {
+    String? imagePath,
+    required String sourceHost,
+    int serverOffset = 0,
+  }) {
     if (imagePath != null && imagePath.isNotEmpty) {
       return _nhResolvePath(
         imagePath,
-        cdnHost: _nhCdnHost(sourceHost, prefix: 'i1'),
+        sourceHost: sourceHost,
+        thumbnail: false,
+        serverOffset: serverOffset,
       );
     }
-    return 'https://${_nhCdnHost(sourceHost, prefix: 'i1')}/galleries/$mediaId/$pageNo.${_nhType2Ext(type)}';
+    return _nhResolvePath(
+      'galleries/$mediaId/$pageNo.${_nhType2Ext(type)}',
+      sourceHost: sourceHost,
+      thumbnail: false,
+      serverOffset: serverOffset,
+    );
   }
 
   int _parseInt(dynamic value) {
@@ -2566,21 +3126,22 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     return _parseResponse(response, parser);
   }
 
-  Future<Response> head<T>(
-      {required String url, CancelToken? cancelToken, Options? options}) {
-    return _dio.head(
-      url,
-      cancelToken: cancelToken,
-      options: options,
-    );
+  Future<Response> head<T>({
+    required String url,
+    CancelToken? cancelToken,
+    Options? options,
+  }) {
+    return _dio.head(url, cancelToken: cancelToken, options: options);
   }
 
   Future<T> _parseResponse<T>(Response response, HtmlParser<T>? parser) async {
     if (parser == null) {
       return response as T;
     }
-    return isolateService.run(
-        (list) => parser(list[0], list[1]), [response.headers, response.data]);
+    return isolateService.run((list) => parser(list[0], list[1]), [
+      response.headers,
+      response.data,
+    ]);
   }
 
   Future<Response> _getWithErrorHandler<T>(
@@ -2647,7 +3208,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     if (e.response?.statusCode == 404 &&
         networkSetting.allHostAndIPs.contains(e.requestOptions.uri.host)) {
       String? errMessage = EHSpiderParser.a404Page2GalleryDeletedHint(
-          e.response!.headers, e.response!.data);
+        e.response!.headers,
+        e.response!.data,
+      );
       if (!isEmptyOrNull(errMessage)) {
         return EHSiteException(
           type: EHSiteExceptionType.galleryDeleted,
@@ -2786,37 +3349,41 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       int aid = int.parse(aidMatch.group(1)!);
       String title = titleLink.text.trim();
       String infoText = item.querySelector('.info_col')?.text.trim() ?? '';
-      ({int? pageCount, String publishTime}) meta =
-          _parseWnSearchMeta(infoText);
+      ({int? pageCount, String publishTime}) meta = _parseWnSearchMeta(
+        infoText,
+      );
 
       var img = item.querySelector('img');
       String coverUrl = '';
       if (img != null) {
         coverUrl = _normalizeWnUrl(
-            img.attributes['src'] ?? img.attributes['data-src'] ?? '');
+          img.attributes['src'] ?? img.attributes['data-src'] ?? '',
+        );
       }
 
-      gallerys.add(Gallery(
-        galleryUrl: GalleryUrl(
-          isEH: true,
-          isWN: true,
-          gid: aid,
-          token: 'wnacg',
+      gallerys.add(
+        Gallery(
+          galleryUrl: GalleryUrl(
+            isEH: true,
+            isWN: true,
+            gid: aid,
+            token: 'wnacg',
+          ),
+          title: title,
+          category: 'Manga',
+          cover: GalleryImage(url: coverUrl),
+          pageCount: meta.pageCount,
+          rating: 0,
+          hasRated: false,
+          favoriteTagIndex: null,
+          favoriteTagName: null,
+          language: null,
+          uploader: null,
+          publishTime: meta.publishTime,
+          isExpunged: false,
+          tags: LinkedHashMap(),
         ),
-        title: title,
-        category: 'Manga',
-        cover: GalleryImage(url: coverUrl),
-        pageCount: meta.pageCount,
-        rating: 0,
-        hasRated: false,
-        favoriteTagIndex: null,
-        favoriteTagName: null,
-        language: null,
-        uploader: null,
-        publishTime: meta.publishTime,
-        isExpunged: false,
-        tags: LinkedHashMap(),
-      ));
+      );
     }
 
     // Parse pagination
@@ -2827,8 +3394,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     int? totalPages;
     var resultElement = document.querySelector('#bodywrap .result > b');
     if (resultElement != null) {
-      int? totalCount =
-          int.tryParse(resultElement.text.trim().replaceAll(',', ''));
+      int? totalCount = int.tryParse(
+        resultElement.text.trim().replaceAll(',', ''),
+      );
       if (totalCount != null) {
         totalPages = (totalCount / 24).ceil();
       }
@@ -2836,8 +3404,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
     // Fallback: check if there's a next page link
     if (totalPages == null) {
-      var pageLinks =
-          document.querySelectorAll('.f_left.paginator > a, .page_num a');
+      var pageLinks = document.querySelectorAll(
+        '.f_left.paginator > a, .page_num a',
+      );
       int maxPage = currentPage;
       for (var link in pageLinks) {
         int? p = int.tryParse(link.text.trim());
@@ -2856,10 +3425,11 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     }
 
     return GalleryPageInfo(
-      gallerys: gallerys,
-      prevGid: currentPage > 1 ? (currentPage - 1).toString() : null,
-      nextGid: next,
-    ) as T;
+          gallerys: gallerys,
+          prevGid: currentPage > 1 ? (currentPage - 1).toString() : null,
+          nextGid: next,
+        )
+        as T;
   }
 
   String? _normalizeWnKeyword(String? rawKeyword) {
@@ -2905,12 +3475,13 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
   ({int? pageCount, String publishTime}) _parseWnSearchMeta(String infoText) {
     int? pageCount = int.tryParse(
-        RegExp(r'(\d+)\s*張圖片').firstMatch(infoText)?.group(1) ?? '');
+      RegExp(r'(\d+)\s*張圖片').firstMatch(infoText)?.group(1) ?? '',
+    );
 
     String publishTime = '';
-    RegExpMatch? timeMatch =
-        RegExp(r'創建於(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})(?::\d{2})?')
-            .firstMatch(infoText);
+    RegExpMatch? timeMatch = RegExp(
+      r'創建於(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})(?::\d{2})?',
+    ).firstMatch(infoText);
     if (timeMatch != null) {
       publishTime = timeMatch.group(1)!.replaceAll(RegExp(r'\s+'), ' ').trim();
     }
@@ -2938,10 +3509,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     _WnacgGalleryCache cache = await _getWnGalleryCache(parsedUrl.gid);
 
     if (parser == EHSpiderParser.detailPage2GalleryAndDetailAndApikey) {
-      return (
-        galleryDetails: _buildWnGalleryDetail(cache),
-        apikey: '',
-      ) as T;
+      return (galleryDetails: _buildWnGalleryDetail(cache), apikey: '') as T;
     }
 
     if (parser == EHSpiderParser.detailPage2Thumbnails) {
@@ -2988,8 +3556,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     }
     String publishTime = _parseWnDetailPublishTime(detailHtml);
 
-    List<html_dom.Element> labels =
-        detailDoc.querySelectorAll('.asTBcell.uwconn > label');
+    List<html_dom.Element> labels = detailDoc.querySelectorAll(
+      '.asTBcell.uwconn > label',
+    );
     String category = labels.isNotEmpty
         ? labels.first.text.trim().replaceFirst('分類：', '')
         : 'Manga';
@@ -3007,9 +3576,13 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
       if (tagLink != null) {
         String tagName = tagLink.text.trim();
         if (tagName.isNotEmpty) {
-          tags.putIfAbsent('tag', () => []).add(GalleryTag(
-                tagData: TagData(namespace: 'tag', key: tagName),
-              ));
+          tags
+              .putIfAbsent('tag', () => [])
+              .add(
+                GalleryTag(
+                  tagData: TagData(namespace: 'tag', key: tagName),
+                ),
+              );
         }
       }
     }
@@ -3026,12 +3599,7 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
     _WnacgGalleryCache cache = _WnacgGalleryCache(
       aid: aid,
-      galleryUrl: GalleryUrl(
-        isEH: true,
-        isWN: true,
-        gid: aid,
-        token: 'wnacg',
-      ),
+      galleryUrl: GalleryUrl(isEH: true, isWN: true, gid: aid, token: 'wnacg'),
       imageInfos: imageInfos,
       title: title,
       cover: cover,
@@ -3099,8 +3667,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
   GalleryDetail _buildWnGalleryDetail(_WnacgGalleryCache cache) {
     int pageCount = cache.imageCount;
-    int thumbnailsPageCount =
-        pageCount == 0 ? 1 : (pageCount / _wnThumbnailsPerPage).ceil();
+    int thumbnailsPageCount = pageCount == 0
+        ? 1
+        : (pageCount / _wnThumbnailsPerPage).ceil();
     if (thumbnailsPageCount < 1) {
       thumbnailsPageCount = 1;
     }
@@ -3137,7 +3706,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   }
 
   List<GalleryThumbnail> _buildWnThumbnails(
-      _WnacgGalleryCache cache, int thumbnailsPageIndex) {
+    _WnacgGalleryCache cache,
+    int thumbnailsPageIndex,
+  ) {
     int imageCount = cache.imageInfos.length;
     if (imageCount == 0) {
       return const [];
@@ -3160,21 +3731,25 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
     for (int i = start; i < end; i++) {
       int pageNo = i + 1;
       _WnacgImageInfo imageInfo = cache.imageInfos[i];
-      thumbnails.add(GalleryThumbnail(
-        href: 'wn://${cache.aid}/$pageNo',
-        isLarge: true,
-        thumbUrl: imageInfo.url,
-        thumbWidth: null,
-        thumbHeight: null,
-        originImageHash: 'wn-${cache.aid}-$pageNo',
-      ));
+      thumbnails.add(
+        GalleryThumbnail(
+          href: 'wn://${cache.aid}/$pageNo',
+          isLarge: true,
+          thumbUrl: imageInfo.url,
+          thumbWidth: null,
+          thumbHeight: null,
+          originImageHash: 'wn-${cache.aid}-$pageNo',
+        ),
+      );
     }
 
     return thumbnails;
   }
 
   DetailPageInfo _buildWnDetailPageInfo(
-      _WnacgGalleryCache cache, int thumbnailsPageIndex) {
+    _WnacgGalleryCache cache,
+    int thumbnailsPageIndex,
+  ) {
     int imageCount = cache.imageInfos.length;
     if (imageCount == 0) {
       return const DetailPageInfo(
@@ -3266,8 +3841,9 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
   }
 
   void _emitEHExceptionIfFailed(Response response) {
-    if (!networkSetting.allHostAndIPs
-        .contains(response.requestOptions.uri.host)) {
+    if (!networkSetting.allHostAndIPs.contains(
+      response.requestOptions.uri.host,
+    )) {
       return;
     }
 
@@ -3276,31 +3852,38 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 
       if (data.isEmpty) {
         throw EHSiteException(
-            type: EHSiteExceptionType.blankBody,
-            message: 'sadPanda'.tr,
-            referLink: 'sadPandaReferLink'.tr);
+          type: EHSiteExceptionType.blankBody,
+          message: 'sadPanda'.tr,
+          referLink: 'sadPandaReferLink'.tr,
+        );
       }
 
       if (data.startsWith('Your IP address')) {
         throw EHSiteException(
-            type: EHSiteExceptionType.banned, message: response.data);
+          type: EHSiteExceptionType.banned,
+          message: response.data,
+        );
       }
       if (data.startsWith('This IP address')) {
         throw EHSiteException(
-            type: EHSiteExceptionType.banned, message: response.data);
+          type: EHSiteExceptionType.banned,
+          message: response.data,
+        );
       }
 
       if (data.startsWith('You have exceeded your image')) {
         throw EHSiteException(
-            type: EHSiteExceptionType.exceedLimit,
-            message: 'exceedImageLimits'.tr);
+          type: EHSiteExceptionType.exceedLimit,
+          message: 'exceedImageLimits'.tr,
+        );
       }
 
       if (data.contains('Page load has been aborted due to a fatal error')) {
         throw EHSiteException(
-            type: EHSiteExceptionType.ehServerError,
-            message: 'ehServerError'.tr,
-            shouldPauseAllDownloadTasks: false);
+          type: EHSiteExceptionType.ehServerError,
+          message: 'ehServerError'.tr,
+          shouldPauseAllDownloadTasks: false,
+        );
       }
     }
   }
@@ -3311,12 +3894,18 @@ class _NHentaiImageInfo {
   final int? width;
   final int? height;
   final String? path;
+  final String? thumbnailPath;
+  final int? thumbnailWidth;
+  final int? thumbnailHeight;
 
   const _NHentaiImageInfo({
     required this.type,
     this.width,
     this.height,
     this.path,
+    this.thumbnailPath,
+    this.thumbnailWidth,
+    this.thumbnailHeight,
   });
 }
 
@@ -3327,6 +3916,7 @@ class _NHentaiGalleryCache {
   final List<_NHentaiImageInfo> pageInfos;
   final Map<String, dynamic> rawGallery;
   final bool hasFullDetail;
+  final bool hasOfficialIncludes;
 
   const _NHentaiGalleryCache({
     required this.gid,
@@ -3335,6 +3925,7 @@ class _NHentaiGalleryCache {
     required this.pageInfos,
     required this.rawGallery,
     required this.hasFullDetail,
+    required this.hasOfficialIncludes,
   });
 }
 

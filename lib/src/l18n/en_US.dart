@@ -457,6 +457,26 @@ class en_US {
       'checkClipboard': 'Check Gallery URL in Clipboard',
       'nhentaiDomains': 'nhentai Domains',
       'addNhentaiDomain': 'Add nhentai Domain',
+      'nhentaiApiKey': 'nhentai API Key',
+      'nhentaiApiKeyHint':
+          'Optional. Generate one in your nhentai.net account settings. It is included in cloud sync.',
+      'nhentaiApiKeyConfigured': 'Configured',
+      'nhentaiApiKeyNotConfigured': 'Not configured',
+      'nhentaiApiSetting': 'nhentai API Key',
+      'nhentaiApiKeyVerified': 'Verified as @username',
+      'nhentaiApiKeyValidationFailed': 'The API key could not be verified.',
+      'nhentaiArchiveFormat': 'Archive format',
+      'nhentaiOfficialArchiveHint':
+          'Uses an official short-lived download link and refreshes it when resuming.',
+      'nhentaiTagSuggestions': 'Tag suggestions',
+      'nhentaiSuggestionsReadOnly':
+          'API keys can view suggestions, but voting requires a user token.',
+      'nhentaiCommentsReadOnly':
+          'nhentai comments are read-only with an API key.',
+      'nhentaiBlacklistTag': 'Add this tag to the nhentai blacklist?',
+      'nhentaiUnblacklistTag': 'Remove this tag from the nhentai blacklist?',
+      'relatedGalleries': 'Related galleries',
+      'votes': 'Votes',
       'clearPageCache': 'Clear Page Cache',
       'clearSuccess': 'Clear Success',
       'superResolution': 'Image Super Resolution',

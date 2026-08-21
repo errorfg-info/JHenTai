@@ -467,6 +467,29 @@ class pt_BR {
           'Verificar se há URL de Galeria na área de transferência',
       'nhentaiDomains': 'Domínios nhentai',
       'addNhentaiDomain': 'Adicionar domínio nhentai',
+      'nhentaiApiKey': 'Chave da API do nhentai',
+      'nhentaiApiKeyHint':
+          'Opcional. Gere uma nas configurações da sua conta nhentai.net. Ela será incluída na sincronização em nuvem.',
+      'nhentaiApiKeyConfigured': 'Configurada',
+      'nhentaiApiKeyNotConfigured': 'Não configurada',
+      'nhentaiApiSetting': 'Chave da API do nhentai',
+      'nhentaiApiKeyVerified': 'Verificada como @username',
+      'nhentaiApiKeyValidationFailed':
+          'Não foi possível verificar a chave da API.',
+      'nhentaiArchiveFormat': 'Formato do arquivo',
+      'nhentaiOfficialArchiveHint':
+          'Usa um link oficial temporário e o renova ao retomar.',
+      'nhentaiTagSuggestions': 'Sugestões de tags',
+      'nhentaiSuggestionsReadOnly':
+          'A chave de API permite visualizar; votar exige um token de usuário.',
+      'nhentaiCommentsReadOnly':
+          'Os comentários do nhentai são somente leitura com uma chave de API.',
+      'nhentaiBlacklistTag':
+          'Adicionar esta tag à lista de bloqueio do nhentai?',
+      'nhentaiUnblacklistTag':
+          'Remover esta tag da lista de bloqueio do nhentai?',
+      'relatedGalleries': 'Galerias relacionadas',
+      'votes': 'Votos',
       'clearPageCache': 'Limpar cache de página',
       'clearSuccess': 'Limpado com Sucesso',
       'superResolution': 'Image Super Resolution',

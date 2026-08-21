@@ -40,7 +40,11 @@ class FavoritePageLogic extends BasePageLogic {
   @override
   Future<void> handleRefresh({String? updateId}) async {
     if (state.showNhFavorites) {
-      _loadNhFavorites();
+      if (ehRequest.hasNhentaiApiKey) {
+        await super.handleRefresh(updateId: updateId);
+      } else {
+        await _loadNhFavorites();
+      }
       return;
     }
     if (state.showWnFavorites) {
@@ -55,7 +59,13 @@ class FavoritePageLogic extends BasePageLogic {
 
   @override
   Future<void> loadBefore() async {
-    if (state.showNhFavorites || state.showWnFavorites) return;
+    if (state.showNhFavorites) {
+      if (ehRequest.hasNhentaiApiKey) {
+        await super.loadBefore();
+      }
+      return;
+    }
+    if (state.showWnFavorites) return;
     await super.loadBefore();
     if (state.mixedMode) {
       _mergeLocalFavoritesForDisplay();
@@ -64,7 +74,13 @@ class FavoritePageLogic extends BasePageLogic {
 
   @override
   Future<void> loadMore({bool checkLoadingState = true}) async {
-    if (state.showNhFavorites || state.showWnFavorites) return;
+    if (state.showNhFavorites) {
+      if (ehRequest.hasNhentaiApiKey) {
+        await super.loadMore(checkLoadingState: checkLoadingState);
+      }
+      return;
+    }
+    if (state.showWnFavorites) return;
     await super.loadMore(checkLoadingState: checkLoadingState);
     if (state.mixedMode) {
       _mergeLocalFavoritesForDisplay();
@@ -189,7 +205,7 @@ class FavoritePageLogic extends BasePageLogic {
 
   Future<void> reloadNhentaiFavoriteGallerys() async {
     if (state.showNhFavorites) {
-      _loadNhFavorites();
+      await _loadNhFavorites();
     } else if (state.mixedMode) {
       _mergeLocalFavoritesForDisplay();
       updateSafely();
@@ -206,6 +222,10 @@ class FavoritePageLogic extends BasePageLogic {
   }
 
   Future<void> _loadNhFavorites() async {
+    if (ehRequest.hasNhentaiApiKey) {
+      return handleClearAndRefresh();
+    }
+
     List<Gallery> nhFavorites = nhentaiFavoriteService.getDisplayFavorites(
       sortOrder: state.favoriteSortOrder,
       searchConfig: state.searchConfig,
@@ -226,6 +246,27 @@ class FavoritePageLogic extends BasePageLogic {
 
     jump2Top();
     updateSafely();
+  }
+
+  @override
+  Future<GalleryPageInfo> getGalleryPage({
+    String? prevGid,
+    String? nextGid,
+    DateTime? seek,
+  }) async {
+    if (state.showNhFavorites && ehRequest.hasNhentaiApiKey) {
+      await state.searchConfigInitCompleter.future;
+      int pageNo = int.tryParse(nextGid ?? prevGid ?? '') ?? 1;
+      return ehRequest.requestNhFavoritePage(
+        pageNo: pageNo,
+        searchConfig: state.searchConfig,
+      );
+    }
+    return super.getGalleryPage(
+      prevGid: prevGid,
+      nextGid: nextGid,
+      seek: seek,
+    );
   }
 
   Future<void> _loadWnFavorites() async {

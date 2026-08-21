@@ -467,6 +467,26 @@ class ru_RU {
       'checkClipboard': 'Проверять URL галереи в буфере обмена',
       'nhentaiDomains': 'Домены nhentai',
       'addNhentaiDomain': 'Добавить домен nhentai',
+      'nhentaiApiKey': 'Ключ API nhentai',
+      'nhentaiApiKeyHint':
+          'Необязательно. Создайте ключ в настройках аккаунта nhentai.net. Он включается в облачную синхронизацию.',
+      'nhentaiApiKeyConfigured': 'Настроен',
+      'nhentaiApiKeyNotConfigured': 'Не настроен',
+      'nhentaiApiSetting': 'Ключ API nhentai',
+      'nhentaiApiKeyVerified': 'Проверено как @username',
+      'nhentaiApiKeyValidationFailed': 'Не удалось проверить ключ API.',
+      'nhentaiArchiveFormat': 'Формат архива',
+      'nhentaiOfficialArchiveHint':
+          'Используется официальная временная ссылка, обновляемая при возобновлении.',
+      'nhentaiTagSuggestions': 'Предложения тегов',
+      'nhentaiSuggestionsReadOnly':
+          'Ключ API позволяет просмотр; для голосования нужен токен пользователя.',
+      'nhentaiCommentsReadOnly':
+          'С ключом API комментарии nhentai доступны только для чтения.',
+      'nhentaiBlacklistTag': 'Добавить этот тег в чёрный список nhentai?',
+      'nhentaiUnblacklistTag': 'Удалить этот тег из чёрного списка nhentai?',
+      'relatedGalleries': 'Похожие галереи',
+      'votes': 'Голоса',
       'clearPageCache': 'Очистить кэш страниц',
       'clearSuccess': 'Успешно очищено',
       'superResolution': 'Супер-разрешение изображений',

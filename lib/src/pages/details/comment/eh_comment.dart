@@ -88,6 +88,7 @@ class _EHCommentState extends State<EHComment> {
             votedDown: widget.comment.votedDown,
             onVoted: widget.onVoted,
             handleTapUpdateCommentButton: widget.handleTapUpdateCommentButton,
+            showScore: widget.comment.showScore,
           ),
         ],
       ).paddingOnly(left: 8, right: 8, top: 8, bottom: 6),
@@ -452,6 +453,7 @@ class _EHCommentFooter extends StatefulWidget {
   final bool votedDown;
   final Function(int commentId)? handleTapUpdateCommentButton;
   final Function(bool isVotingUp, String score)? onVoted;
+  final bool showScore;
 
   const _EHCommentFooter({
     Key? key,
@@ -466,6 +468,7 @@ class _EHCommentFooter extends StatefulWidget {
     required this.votedDown,
     this.onVoted,
     this.handleTapUpdateCommentButton,
+    required this.showScore,
   }) : super(key: key);
 
   @override
@@ -520,7 +523,8 @@ class _EHCommentFooterState extends State<_EHCommentFooter> with LoginRequiredMi
             child: const Icon(Icons.edit_note, size: UIConfig.commentButtonSizeInCommentPage),
           ),
 
-        GestureDetector(
+        if (widget.showScore)
+          GestureDetector(
           onTap: () => score.isEmpty ? null : Get.dialog(EHCommentScoreDetailsDialog(scoreDetails: widget.scoreDetails)),
 
           /// fix width to align buttons

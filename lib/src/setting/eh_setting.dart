@@ -16,6 +16,7 @@ class EHSetting
   RxBool redirect2Eh = true.obs;
   RxString wnacgDomain = 'www.wn07.ru'.obs;
   RxList<String> nhentaiDomains = <String>['nhentai.net', 'nhentai.to'].obs;
+  String legacyNhentaiApiKey = '';
 
   bool get isEHSite => site.value == 'EH';
   bool get isEXSite => site.value == 'EX';
@@ -34,7 +35,10 @@ class EHSetting
     Map map = jsonDecode(configString);
 
     String siteValue = map['site'] ?? 'EH';
-    if (siteValue != 'EH' && siteValue != 'EX' && siteValue != 'NH' && siteValue != 'WN') {
+    if (siteValue != 'EH' &&
+        siteValue != 'EX' &&
+        siteValue != 'NH' &&
+        siteValue != 'WN') {
       siteValue = 'EH';
     }
     site.value = siteValue;
@@ -43,6 +47,7 @@ class EHSetting
     if (map['nhentaiDomains'] != null) {
       nhentaiDomains.value = (map['nhentaiDomains'] as List).cast<String>();
     }
+    legacyNhentaiApiKey = map['nhentaiApiKey']?.toString().trim() ?? '';
   }
 
   @override

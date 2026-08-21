@@ -1,6 +1,7 @@
 import 'package:collection/collection.dart';
 import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:get/get.dart';
 import 'package:jhentai/src/config/ui_config.dart';
 import 'package:jhentai/src/pages/download/download_base_page.dart';
@@ -47,44 +48,10 @@ class MobileLayoutPageV2 extends StatelessWidget {
   }
 
   Widget buildLeftDrawer(BuildContext context) {
-    return Drawer(
-      width: 278,
-      child: GetBuilder<MobileLayoutPageV2Logic>(
-        id: logic.tabBarId,
-        builder: (_) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const EHUserAvatar(),
-              Expanded(
-                child: ScrollConfiguration(
-                  behavior: UIConfig.leftDrawerPhysicsBehaviour,
-                  child: ListView.builder(
-                    key: const PageStorageKey('leftDrawer'),
-                    controller: state.scrollController,
-                    itemCount: state.icons.length,
-                    cacheExtent: 1000,
-                    itemBuilder: (context, index) => ListTile(
-                      dense: true,
-                      title: Text(state.icons[index].name.name.tr, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                      selected: state.selectedDrawerTabIndex == index,
-                      selectedTileColor: UIConfig.mobileDrawerSelectedTileColor(context),
-                      leading: state.icons[index].unselectedIcon,
-                      shape: const RoundedRectangleBorder(
-                        borderRadius: BorderRadiusDirectional.only(topEnd: Radius.circular(32), bottomEnd: Radius.circular(32)),
-                      ),
-                      onTap: () => logic.handleTapTabBarButton(index),
-                    ).marginOnly(right: 8, top: 2),
-                  ),
-                ),
-              ),
-              const ReaderSourceSwitcher(
-                currentSource: ReaderSourceType.jhentai,
-              ),
-            ],
-          ),
-        ),
-      ),
+    return MobileLeftDrawer(
+      logic: logic,
+      state: state,
+      currentSource: ReaderSourceType.jhentai,
     );
   }
 
@@ -147,6 +114,98 @@ class MobileLayoutPageV2 extends StatelessWidget {
             ),
           )
           .toList(),
+    );
+  }
+}
+
+class MobileLeftDrawer extends StatelessWidget {
+  const MobileLeftDrawer({
+    super.key,
+    required this.state,
+    required this.currentSource,
+    this.logic,
+    this.onBeforeSwitch,
+    this.onDestinationSelected,
+    this.showSelectedDestination = true,
+  }) : assert(logic != null || onDestinationSelected != null);
+
+  final MobileLayoutPageV2State state;
+  final MobileLayoutPageV2Logic? logic;
+  final ReaderSourceType currentSource;
+  final VoidCallback? onBeforeSwitch;
+  final ValueChanged<int>? onDestinationSelected;
+  final bool showSelectedDestination;
+
+  @override
+  Widget build(BuildContext context) {
+    return Drawer(
+      key: const ValueKey<String>('mobileLeftDrawer'),
+      width: 278,
+      child: logic == null
+          ? _buildContent(context)
+          : GetBuilder<MobileLayoutPageV2Logic>(
+              id: logic!.tabBarId,
+              builder: (_) => _buildContent(context),
+            ),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const EHUserAvatar(),
+          Expanded(
+            child: ScrollConfiguration(
+              behavior: UIConfig.leftDrawerPhysicsBehaviour,
+              child: ListView.builder(
+                key: const PageStorageKey('leftDrawer'),
+                controller: state.scrollController,
+                itemCount: state.icons.length,
+                scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
+                itemBuilder: (context, index) => ListTile(
+                  key: ValueKey<String>(
+                    'readerMenu:${state.icons[index].name.name}',
+                  ),
+                  dense: true,
+                  title: Text(
+                    state.icons[index].name.name.tr,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
+                  ),
+                  selected:
+                      showSelectedDestination &&
+                      state.selectedDrawerTabIndex == index,
+                  selectedTileColor: UIConfig.mobileDrawerSelectedTileColor(
+                    context,
+                  ),
+                  leading: state.icons[index].unselectedIcon,
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadiusDirectional.only(
+                      topEnd: Radius.circular(32),
+                      bottomEnd: Radius.circular(32),
+                    ),
+                  ),
+                  onTap: () {
+                    if (onDestinationSelected != null) {
+                      onDestinationSelected!(index);
+                      return;
+                    }
+                    logic!.handleTapTabBarButton(index);
+                  },
+                ).marginOnly(right: 8, top: 2),
+              ),
+            ),
+          ),
+          ReaderSourceSwitcher(
+            currentSource: currentSource,
+            onBeforeSwitch: onBeforeSwitch,
+          ),
+        ],
+      ),
     );
   }
 }

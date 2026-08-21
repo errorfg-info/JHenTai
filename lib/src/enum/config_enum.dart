@@ -35,6 +35,7 @@ enum ConfigEnum {
   syncSetting('syncSetting'),
   keyboardShortcutSetting('keyboardShortcutSetting'),
   komgaSetting('komgaSetting'),
+  nhentaiApiSetting('nhentaiApiSetting'),
   komgaBrowseSetting('komgaBrowseSetting'),
   downloadSearchPageType('downloadSearchPageType'),
   windowFullScreen('windowFullScreen'),

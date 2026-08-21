@@ -10,6 +10,7 @@ import 'package:jhentai/src/service/wnacg_favorite_service.dart';
 import 'package:jhentai/src/service/quick_search_service.dart';
 import 'package:jhentai/src/service/search_history_service.dart';
 import 'package:jhentai/src/setting/komga_setting.dart';
+import 'package:jhentai/src/setting/nhentai_api_setting.dart';
 import 'package:jhentai/src/setting/sync_setting.dart';
 import 'package:jhentai/src/utils/sync_time_util.dart';
 
@@ -35,6 +36,7 @@ class CloudConfigService
     CloudConfigTypeEnum.nhentaiFavorite: '1.0.0',
     CloudConfigTypeEnum.wnacgFavorite: '1.0.0',
     CloudConfigTypeEnum.komgaSetting: '1.0.0',
+    CloudConfigTypeEnum.nhentaiApiSetting: '1.0.0',
   };
 
   static const int localConfigId = -1;
@@ -175,6 +177,18 @@ class CloudConfigService
         await komgaSetting.refreshBean();
         log.info('  ✅ Komga setting imported and refreshed');
         break;
+      case CloudConfigTypeEnum.nhentaiApiSetting:
+        await localConfigService.batchWrite([
+          LocalConfigCompanion(
+            configKey: Value(ConfigEnum.nhentaiApiSetting.key),
+            subConfigKey: const Value(LocalConfigService.defaultSubConfigKey),
+            value: Value(config.config),
+            utime: Value(SyncTimeUtil.format(config.ctime)),
+          ),
+        ]);
+        await nhentaiApiSetting.refreshBean();
+        log.info('  ✅ nhentai API setting imported and refreshed');
+        break;
     }
   }
 
@@ -252,6 +266,16 @@ class CloudConfigService
       case CloudConfigTypeEnum.komgaSetting:
         List<LocalConfig> records = await localConfigService.readWithAllSubKeys(
           configKey: ConfigEnum.komgaSetting,
+        );
+        if (records.isEmpty) {
+          return null;
+        }
+        configValue = records.first.value;
+        localConfigTime = SyncTimeUtil.tryParse(records.first.utime);
+        break;
+      case CloudConfigTypeEnum.nhentaiApiSetting:
+        List<LocalConfig> records = await localConfigService.readWithAllSubKeys(
+          configKey: ConfigEnum.nhentaiApiSetting,
         );
         if (records.isEmpty) {
           return null;

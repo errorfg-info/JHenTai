@@ -11,6 +11,8 @@ class GalleryTag {
   TagData tagData;
   EHTagStatus? tagStatus;
   EHTagVoteStatus? voteStatus;
+  int? nhentaiId;
+  bool nhentaiBlacklisted;
 
   GalleryTag({
     this.color,
@@ -18,6 +20,8 @@ class GalleryTag {
     required this.tagData,
     this.tagStatus,
     this.voteStatus,
+    this.nhentaiId,
+    this.nhentaiBlacklisted = false,
   });
 
   Map<String, dynamic> toJson() {
@@ -27,6 +31,8 @@ class GalleryTag {
       'tagData': tagData.toJson()..removeWhere((key, value) => value == null),
       'tagStatus': tagStatus?.index,
       'voteStatus': voteStatus?.index,
+      'nhentaiId': nhentaiId,
+      'nhentaiBlacklisted': nhentaiBlacklisted ? true : null,
     }..removeWhere((key, value) => value == null);
   }
 
@@ -37,6 +43,8 @@ class GalleryTag {
       tagData: TagData.fromJson(map['tagData']),
       tagStatus: map['tagStatus'] == null ? null : EHTagStatus.values[map['tagStatus']],
       voteStatus: EHTagVoteStatus.values[map['voteStatus'] ?? EHTagVoteStatus.none.index],
+      nhentaiId: map['nhentaiId'],
+      nhentaiBlacklisted: map['nhentaiBlacklisted'] ?? false,
     );
   }
 
@@ -51,6 +59,8 @@ class GalleryTag {
     TagData? tagData,
     EHTagStatus? tagStatus,
     EHTagVoteStatus? voteStatus,
+    int? nhentaiId,
+    bool? nhentaiBlacklisted,
   }) {
     return GalleryTag(
       color: color ?? this.color,
@@ -58,6 +68,8 @@ class GalleryTag {
       tagData: tagData ?? this.tagData,
       tagStatus: tagStatus ?? this.tagStatus,
       voteStatus: voteStatus ?? this.voteStatus,
+      nhentaiId: nhentaiId ?? this.nhentaiId,
+      nhentaiBlacklisted: nhentaiBlacklisted ?? this.nhentaiBlacklisted,
     );
   }
 }

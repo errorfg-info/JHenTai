@@ -21,6 +21,7 @@ import 'package:jhentai/src/model/gallery_thumbnail.dart';
 import 'package:jhentai/src/model/gallery_url.dart';
 import 'package:jhentai/src/model/read_page_info.dart';
 import 'package:jhentai/src/network/eh_request.dart';
+import 'package:jhentai/src/network/nhentai_api_support.dart';
 import 'package:jhentai/src/pages/download/download_base_page.dart';
 import 'package:jhentai/src/pages/favorite/favorite_page_logic.dart';
 import 'package:jhentai/src/service/read_progress_service.dart';
@@ -47,6 +48,7 @@ import 'package:jhentai/src/utils/screen_size_util.dart';
 import 'package:jhentai/src/utils/snack_util.dart';
 import 'package:jhentai/src/widget/loading_state_indicator.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../exception/eh_site_exception.dart';
 import '../../mixin/scroll_to_top_logic_mixin.dart';
@@ -64,6 +66,7 @@ import '../../service/local_block_rule_service.dart';
 import '../../service/nhentai_favorite_service.dart';
 import '../../service/wnacg_favorite_service.dart';
 import '../../setting/eh_setting.dart';
+import '../../setting/preference_setting.dart';
 import '../../setting/read_setting.dart';
 import '../../setting/site_setting.dart';
 import '../../utils/process_util.dart';
@@ -77,6 +80,9 @@ import '../../widget/eh_gallery_history_dialog.dart';
 import '../../widget/eh_tag_dialog.dart';
 import '../../widget/jump_page_dialog.dart';
 import '../../widget/re_unlock_dialog.dart';
+import '../../widget/nhentai_archive_dialog.dart';
+import '../../widget/nhentai_related_dialog.dart';
+import '../../widget/nhentai_tag_suggestions_dialog.dart';
 import 'details_page_state.dart';
 
 class DetailsPageArgument {
@@ -192,6 +198,12 @@ class DetailsPageLogic extends GetxController
       state.gallery?.uploader ??
       state.galleryMetadata?.uploader ??
       '';
+
+  GalleryUrl get _effectiveGalleryUrl =>
+      state.galleryDetails?.galleryUrl ?? state.galleryUrl;
+
+  bool get hasNhentaiOfficialApi =>
+      ehRequest.supportsNhentaiOfficialApi(_effectiveGalleryUrl);
 
   Future<void> getDetails(
       {bool refreshPageImmediately = true,
@@ -642,6 +654,10 @@ class DetailsPageLogic extends GetxController
   }
 
   Future<void> _handleTapNhentaiFavorite({required bool useDefault}) async {
+    if (hasNhentaiOfficialApi) {
+      return _handleTapNhentaiRemoteFavorite();
+    }
+
     if (state.favoriteState == LoadingState.loading) {
       return;
     }
@@ -731,6 +747,69 @@ class DetailsPageLogic extends GetxController
     );
   }
 
+  Future<void> _handleTapNhentaiRemoteFavorite() async {
+    if (state.favoriteState == LoadingState.loading) {
+      return;
+    }
+
+    bool wasFavorite = state.galleryDetails?.favoriteTagIndex != null ||
+        state.gallery?.favoriteTagIndex != null;
+    state.favoriteState = LoadingState.loading;
+    updateSafely([favoriteId]);
+
+    try {
+      ({bool favorited, int? numFavorites}) result =
+          await ehRequest.requestNhSetFavorite(
+        state.galleryUrl.gid,
+        favorited: !wasFavorite,
+      );
+      state.gallery
+        ?..favoriteTagIndex = result.favorited ? 0 : null
+        ..favoriteTagName = null;
+      state.galleryDetails
+        ?..favoriteTagIndex = result.favorited ? 0 : null
+        ..favoriteTagName = null;
+      if (state.galleryDetails != null) {
+        state.galleryDetails!.favoriteCount = result.numFavorites ??
+            (state.galleryDetails!.favoriteCount +
+                (result.favorited ? 1 : -1))
+                .clamp(0, 1 << 31)
+                .toInt();
+      }
+    } on DioException catch (e) {
+      log.error('Update nhentai favorite failed', e.errorMsg);
+      snack(
+        wasFavorite ? 'removeFavoriteFailed'.tr : 'favoriteGalleryFailed'.tr,
+        e.errorMsg ?? '',
+        isShort: true,
+      );
+      state.favoriteState = LoadingState.error;
+      updateSafely([favoriteId]);
+      return;
+    } catch (e, s) {
+      log.error('Update nhentai favorite failed', e, s);
+      snack(
+        wasFavorite ? 'removeFavoriteFailed'.tr : 'favoriteGalleryFailed'.tr,
+        e.toString(),
+        isShort: true,
+      );
+      state.favoriteState = LoadingState.error;
+      updateSafely([favoriteId]);
+      return;
+    }
+
+    if (Get.isRegistered<FavoritePageLogic>()) {
+      await Get.find<FavoritePageLogic>().reloadNhentaiFavoriteGallerys();
+    }
+    state.favoriteState = LoadingState.idle;
+    updateSafely([favoriteId, detailsId]);
+    updateGlobalGalleryStatus();
+    toast(
+      wasFavorite ? 'removeFavoriteSuccess'.tr : 'favoriteGallerySuccess'.tr,
+      isCenter: false,
+    );
+  }
+
   Gallery? _getNhFavoriteGallerySnapshot() {
     if (state.gallery != null) {
       return state.gallery;
@@ -745,6 +824,10 @@ class DetailsPageLogic extends GetxController
 
   void _syncNhFavoriteStatus() {
     if (!state.galleryUrl.isNH) {
+      return;
+    }
+
+    if (hasNhentaiOfficialApi) {
       return;
     }
 
@@ -982,7 +1065,8 @@ class DetailsPageLogic extends GetxController
   }
 
   Future<void> handleTapArchive(BuildContext context) async {
-    if (state.galleryUrl.isNH || state.galleryUrl.isWN) {
+    if (state.galleryUrl.isWN ||
+        (state.galleryUrl.isNH && !hasNhentaiOfficialApi)) {
       return;
     }
 
@@ -991,6 +1075,57 @@ class DetailsPageLogic extends GetxController
 
     /// new download
     if (archiveStatus == null) {
+      if (state.galleryUrl.isNH) {
+        String initialGroup = downloadSetting.defaultArchiveGroup.value ??
+            archiveDownloadService.allGroups.firstOrNull ??
+            'default'.tr;
+        List<String> groups = List<String>.of(archiveDownloadService.allGroups);
+        if (!groups.contains(initialGroup)) {
+          groups.insert(0, initialGroup);
+        }
+        NHentaiArchiveDialogResult? result =
+            await Get.dialog<NHentaiArchiveDialogResult>(
+          NHentaiArchiveDialog(
+            currentGroup: initialGroup,
+            candidates: groups,
+          ),
+        );
+        if (result == null || state.galleryDetails == null) {
+          return;
+        }
+
+        ArchiveDownloadedData archive = ArchiveDownloadedData(
+          gid: state.galleryDetails!.galleryUrl.gid,
+          token: state.galleryDetails!.galleryUrl.token,
+          title: mainTitleText,
+          category: state.galleryDetails!.category,
+          pageCount: state.galleryDetails!.pageCount,
+          galleryUrl: state.galleryDetails!.galleryUrl.url,
+          uploader: state.galleryDetails!.uploader,
+          size: 0,
+          coverUrl: state.galleryDetails!.cover.url,
+          publishTime: state.galleryDetails!.publishTime,
+          archiveStatusCode: ArchiveStatus.unlocking.code,
+          archivePageUrl: Uri.https(
+            NHentaiApiSupport.officialHost,
+            '/api/v2/galleries/${state.galleryDetails!.galleryUrl.gid}/download',
+            {'format': result.format},
+          ).toString(),
+          isOriginal: true,
+          insertTime: DateTime.now().toString(),
+          sortOrder: 0,
+          groupName: result.group,
+          tags: tagMap2TagString(state.galleryDetails!.tags),
+          tagRefreshTime: DateTime.now().toString(),
+          parseSource: ArchiveParseSource.official.code,
+        );
+        archiveDownloadService.downloadArchive(archive);
+        updateGlobalGalleryStatus();
+        toast('${'beginToDownloadArchive'.tr}:  ${archive.title}',
+            isCenter: false);
+        return;
+      }
+
       if (!userSetting.hasLoggedIn()) {
         showLoginToast();
         return;
@@ -1135,6 +1270,29 @@ class DetailsPageLogic extends GetxController
   }
 
   void searchSimilar() {
+    if (state.galleryUrl.isNH &&
+        hasNhentaiOfficialApi &&
+        (state.galleryDetails?.relatedGallerys.isNotEmpty ?? false)) {
+      Get.dialog(
+        NHentaiRelatedDialog(
+          gallerys: state.galleryDetails!.relatedGallerys,
+          onTap: (gallery) {
+            Get.back();
+            toRoute(
+              Routes.details,
+              arguments: DetailsPageArgument(
+                galleryUrl: gallery.galleryUrl,
+                gallery: gallery,
+              ),
+              offAllBefore: false,
+              preventDuplicates: false,
+            );
+          },
+        ),
+      );
+      return;
+    }
+
     String? keyword = _buildTitleSearchKeyword();
     if (keyword == null) {
       return;
@@ -1180,7 +1338,30 @@ class DetailsPageLogic extends GetxController
   }
 
   Future<void> handleTapTorrent() async {
-    if (state.galleryUrl.isNH || state.galleryUrl.isWN) {
+    if (state.galleryUrl.isNH) {
+      if (!hasNhentaiOfficialApi) {
+        return;
+      }
+      try {
+        var link = await ehRequest.requestNhDownload(
+          state.galleryUrl.gid,
+          format: 'torrent',
+        );
+        await launchUrlString(
+          link.url,
+          mode: LaunchMode.externalApplication,
+        );
+      } on DioException catch (e) {
+        log.error('Get nhentai torrent failed', e.errorMsg);
+        snack('getGalleryTorrentsFailed'.tr, e.errorMsg ?? '');
+      } catch (e, s) {
+        log.error('Get nhentai torrent failed', e, s);
+        snack('getGalleryTorrentsFailed'.tr, e.toString());
+      }
+      return;
+    }
+
+    if (state.galleryUrl.isWN) {
       return;
     }
 
@@ -1243,6 +1424,49 @@ class DetailsPageLogic extends GetxController
     removeCache();
   }
 
+  Future<void> openCommentsPage() async {
+    if (!state.galleryUrl.isNH) {
+      toRoute(Routes.comment, arguments: state.galleryDetails!.comments);
+      return;
+    }
+    if (!hasNhentaiOfficialApi) {
+      return;
+    }
+
+    List<GalleryComment> comments;
+    try {
+      comments = await ehRequest.requestNhComments(
+        state.galleryUrl.gid,
+        allPages: preferenceSetting.showAllComments.isTrue,
+      );
+      comments = await localBlockRuleService.executeRules(comments);
+    } on DioException catch (e) {
+      log.error('Get nhentai comments failed', e.errorMsg);
+      snack('failed'.tr, e.errorMsg ?? '', isShort: true);
+      return;
+    } catch (e, s) {
+      log.error('Get nhentai comments failed', e, s);
+      snack('failed'.tr, e.toString(), isShort: true);
+      return;
+    }
+
+    state.galleryDetails!.comments = comments;
+    updateSafely([detailsId]);
+    toRoute(Routes.comment, arguments: comments);
+  }
+
+  void showNhentaiTagSuggestions() {
+    if (!hasNhentaiOfficialApi || state.galleryDetails == null) {
+      return;
+    }
+    Get.dialog(
+      NHentaiTagSuggestionsDialog(
+        suggestions: state.galleryDetails!.nhentaiTagSuggestions,
+        totalCount: state.galleryDetails!.nhentaiTagSuggestionCount,
+      ),
+    );
+  }
+
   Future<void> shareGallery() async {
     log.info('Share gallery:${state.galleryUrl}');
 
@@ -1299,6 +1523,36 @@ class DetailsPageLogic extends GetxController
       voteStatus: tag.voteStatus,
       onTagVoted: (bool isVoted, bool isCancel) => onTagVoted(tag, isVoted, isCancel),
     ));
+  }
+
+  Future<void> toggleNhentaiBlacklistTag(GalleryTag tag) async {
+    if (!hasNhentaiOfficialApi || tag.nhentaiId == null) {
+      return;
+    }
+    bool? confirmed = await Get.dialog<bool>(
+      EHDialog(
+        title: (tag.nhentaiBlacklisted
+                ? 'nhentaiUnblacklistTag'
+                : 'nhentaiBlacklistTag')
+            .tr,
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+
+    try {
+      tag.nhentaiBlacklisted =
+          await ehRequest.requestNhToggleBlacklistTag(tag.nhentaiId!);
+      updateSafely([detailsId]);
+      toast('success'.tr);
+    } on DioException catch (e) {
+      log.error('Update nhentai blacklist failed', e.errorMsg);
+      snack('failed'.tr, e.errorMsg ?? '', isShort: true);
+    } catch (e, s) {
+      log.error('Update nhentai blacklist failed', e, s);
+      snack('failed'.tr, e.toString(), isShort: true);
+    }
   }
 
   Future<void> handleAddTag(BuildContext context) async {

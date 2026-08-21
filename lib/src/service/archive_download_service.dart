@@ -38,6 +38,7 @@ import '../exception/cancel_exception.dart';
 import '../model/comic_info.dart';
 import '../model/gallery_detail.dart';
 import '../model/gallery_image.dart';
+import '../model/gallery_url.dart';
 import '../pages/download/grid/mixin/grid_download_page_service_mixin.dart';
 import '../utils/archive_util.dart';
 import '../utils/file_util.dart';
@@ -86,6 +87,11 @@ class ArchiveDownloadService extends GetxController
     for (ArchiveDownloadedData archive in archives) {
       if (archive.archiveStatusCode >= ArchiveStatus.unlocking.code &&
           archive.archiveStatusCode <= ArchiveStatus.unpacking.code) {
+        if (_isNhentaiArchive(archive) &&
+            archive.archiveStatusCode < ArchiveStatus.downloaded.code) {
+          archiveDownloadInfos[archive.gid]!.archiveStatus =
+              ArchiveStatus.unlocking;
+        }
         downloadArchive(archive, resume: true);
       }
     }
@@ -122,6 +128,16 @@ class ArchiveDownloadService extends GetxController
 
   bool containArchive(int gid) {
     return archiveDownloadInfos.containsKey(gid);
+  }
+
+  bool _isNhentaiArchive(ArchiveDownloadedData archive) =>
+      GalleryUrl.tryParse(archive.galleryUrl)?.isNH == true;
+
+  String _nhentaiArchiveFormat(ArchiveDownloadedData archive) {
+    String format =
+        Uri.tryParse(archive.archivePageUrl)?.queryParameters['format'] ??
+            'zip';
+    return const <String>{'zip', 'cbz'}.contains(format) ? format : 'zip';
   }
 
   Future<void> downloadArchive(ArchiveDownloadedData archive,
@@ -259,14 +275,20 @@ class ArchiveDownloadService extends GetxController
       archiveDownloadInfo.archiveStatus = ArchiveStatus.unlocking;
       archiveDownloadInfo.downloadPageUrl = null;
       archiveDownloadInfo.downloadUrl = null;
+      JDownloadTask? previousTask = archiveDownloadInfo.downloadTask;
       archiveDownloadInfo.downloadTask = null;
       archiveDownloadInfo.cancelToken.cancel();
       archiveDownloadInfo.cancelToken = CancelToken();
-      await archiveDownloadInfo.downloadTask?.pause();
+      await previousTask?.pause();
+      await previousTask?.dispose();
       archiveDownloadInfo.downloadCompleter?.completeError(CancelException());
 
       await _updateArchiveInDatabase(archive.gid);
       update(['$archiveStatusId::${archive.gid}']);
+
+      if (_isNhentaiArchive(archive)) {
+        return;
+      }
 
       /// skip when use bot
       if (archiveDownloadInfo.parseSource == ArchiveParseSource.official.code) {
@@ -959,7 +981,9 @@ class ArchiveDownloadService extends GetxController
     return JDownloadTask.newTask(
       url: url,
       savePath: computePackingFileDownloadPath(archive),
-      isolateCount: downloadSetting.archiveDownloadIsolateCount.value,
+      isolateCount: _isNhentaiArchive(archive)
+          ? 1
+          : downloadSetting.archiveDownloadIsolateCount.value,
       deleteWhenUrlMismatch: false,
       proxyConfig: ehRequest.currentProxyConfig(),
       headConnectionTimeout:
@@ -987,6 +1011,16 @@ class ArchiveDownloadService extends GetxController
 
   Future<void> _check410Or404Reason(
       String url, ArchiveDownloadedData archive) async {
+    if (_isNhentaiArchive(archive)) {
+      ArchiveDownloadInfo info = archiveDownloadInfos[archive.gid]!;
+      await info.downloadTask?.dispose();
+      info.downloadTask = null;
+      info.downloadUrl = null;
+      info.downloadPageUrl = null;
+      await _updateArchiveStatus(archive.gid, ArchiveStatus.unlocking);
+      return downloadArchive(archive, resume: true, reParse: true);
+    }
+
     try {
       await ehRequest.get(
         url: url,
@@ -1137,6 +1171,42 @@ class ArchiveDownloadService extends GetxController
 
     if (!_isTaskInStatus(archive.gid, [ArchiveStatus.unlocking])) {
       return;
+    }
+    if (_isNhentaiArchive(archive)) {
+      if (!ehRequest.hasNhentaiApiKey) {
+        snack('archiveError'.tr, 'nhentaiApiKeyNotConfigured'.tr,
+            isShort: true);
+        return pauseDownloadArchive(archive.gid);
+      }
+
+      log.download('Request official nhentai archive: ${archive.title}');
+      try {
+        var link = await ehRequest.requestNhDownload(
+          archive.gid,
+          format: _nhentaiArchiveFormat(archive),
+        );
+        await archiveDownloadInfo.downloadTask?.dispose();
+        archiveDownloadInfo.downloadTask = null;
+        archiveDownloadInfo.downloadPageUrl = null;
+        archiveDownloadInfo.downloadUrl = link.url;
+        return _updateArchiveStatus(
+          archive.gid,
+          ArchiveStatus.parsedDownloadUrl,
+        );
+      } on DioException catch (e) {
+        if (e.type == DioExceptionType.cancel) {
+          return;
+        }
+        log.download(
+            'Request official nhentai archive failed: ${archive.title}, ${e.message}');
+        snack('archiveError'.tr, e.message ?? '', isShort: true);
+        return pauseDownloadArchive(archive.gid);
+      } catch (e) {
+        log.download(
+            'Request official nhentai archive failed: ${archive.title}, $e');
+        snack('archiveError'.tr, e.toString(), isShort: true);
+        return pauseDownloadArchive(archive.gid);
+      }
     }
     if (archiveDownloadInfo.downloadPageUrl != null) {
       archiveDownloadInfo.archiveStatus = ArchiveStatus.unlocked;
@@ -1455,7 +1525,11 @@ class ArchiveDownloadService extends GetxController
           Response? response = dioException.response;
 
           /// download too many bytes will cause 410/404
-          if (response?.statusCode == 410 || response?.statusCode == 404) {
+          if (response?.statusCode == 410 ||
+              response?.statusCode == 404 ||
+              (_isNhentaiArchive(archive) &&
+                  (response?.statusCode == 401 ||
+                      response?.statusCode == 403))) {
             return await _check410Or404Reason(
                 archiveDownloadInfos[archive.gid]!.downloadUrl!, archive);
           }

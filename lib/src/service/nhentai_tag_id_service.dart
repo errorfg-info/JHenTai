@@ -63,6 +63,7 @@ class NHentaiTagIdService with JHLifeCircleBeanErrorCatch implements JHLifeCircl
       result.putIfAbsent(record.namespace, () => <GalleryTag>[]).add(
             GalleryTag(
               tagData: TagData(namespace: record.namespace, key: record.key),
+              nhentaiId: id,
             ),
           );
     }

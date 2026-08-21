@@ -5,6 +5,7 @@ import 'package:jhentai/src/model/gallery_url.dart';
 
 import 'gallery_comment.dart';
 import 'gallery_image.dart';
+import 'nhentai_api_models.dart';
 import 'gallery_tag.dart';
 import 'gallery_thumbnail.dart';
 
@@ -42,6 +43,10 @@ class GalleryDetail {
   GalleryUrl? parentGalleryUrl;
   List<({GalleryUrl galleryUrl, String title, String updateTime})>? childrenGallerys;
   List<GalleryComment> comments;
+  int commentCount;
+  List<Gallery> relatedGallerys;
+  List<NHentaiTagSuggestion> nhentaiTagSuggestions;
+  int nhentaiTagSuggestionCount;
   List<GalleryThumbnail> thumbnails;
   int thumbnailsPageCount;
 
@@ -75,6 +80,10 @@ class GalleryDetail {
     this.parentGalleryUrl,
     this.childrenGallerys,
     required this.comments,
+    this.commentCount = 0,
+    this.relatedGallerys = const [],
+    this.nhentaiTagSuggestions = const [],
+    this.nhentaiTagSuggestionCount = 0,
     required this.thumbnails,
     required this.thumbnailsPageCount,
   });

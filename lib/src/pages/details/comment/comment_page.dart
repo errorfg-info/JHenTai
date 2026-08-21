@@ -26,7 +26,11 @@ class CommentPage extends StatefulWidget {
 
 class _CommentPageState extends State<CommentPage> with LoginRequiredMixin {
   late List<GalleryComment> comments = Get.arguments;
-  late bool disableButtons = comments.any((comment) => comment.fromMe);
+  late bool disableButtons =
+      _isNhentaiReadOnly || comments.any((comment) => comment.fromMe);
+
+  bool get _isNhentaiReadOnly =>
+      DetailsPageLogic.current?.state.galleryUrl.isNH == true;
 
   final ScrollController _scrollController = ScrollController();
 
@@ -40,14 +44,21 @@ class _CommentPageState extends State<CommentPage> with LoginRequiredMixin {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text('allComments'.tr)),
-      floatingActionButton: FloatingActionButton(onPressed: _handleTapAddCommentButton, child: const Icon(Icons.add)),
+      floatingActionButton: _isNhentaiReadOnly
+          ? null
+          : FloatingActionButton(onPressed: _handleTapAddCommentButton, child: const Icon(Icons.add)),
       body: EHWheelSpeedController(
         controller: _scrollController,
         child: ListView(
           padding: const EdgeInsets.only(top: 6, left: 8, right: 8, bottom: 200),
           controller: _scrollController,
-          children: comments
-              .map(
+          children: [
+            if (_isNhentaiReadOnly)
+              ListTile(
+                leading: const Icon(Icons.visibility_outlined),
+                title: Text('nhentaiCommentsReadOnly'.tr),
+              ),
+            ...comments.map(
                 (comment) => EHComment(
                   comment: comment,
                   inDetailPage: false,
@@ -56,8 +67,8 @@ class _CommentPageState extends State<CommentPage> with LoginRequiredMixin {
                   handleTapUpdateCommentButton: _handleTapUpdateCommentButton,
                   onBlockUser: () => _onBlockUser(comment),
                 ).marginOnly(bottom: 4),
-              )
-              .toList(),
+              ),
+          ],
         ).enableMouseDrag(),
       ),
     );

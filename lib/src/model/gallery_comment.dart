@@ -12,6 +12,7 @@ class GalleryComment {
   bool fromMe;
   bool votedUp;
   bool votedDown;
+  bool showScore;
 
   GalleryComment({
     required this.id,
@@ -25,6 +26,7 @@ class GalleryComment {
     required this.fromMe,
     required this.votedUp,
     required this.votedDown,
+    this.showScore = true,
   });
 
   @override

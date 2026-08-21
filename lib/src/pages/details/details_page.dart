@@ -181,6 +181,19 @@ class DetailsPage extends StatelessWidget with Scroll2TopPageMixin {
                         children: [Text('resetReadProgress'.tr), const Icon(Icons.restore)],
                       ),
                     ),
+                    if (logic.hasNhentaiOfficialApi &&
+                        (state.galleryDetails?.nhentaiTagSuggestionCount ?? 0) >
+                            0)
+                      PopupMenuItem(
+                        value: 7,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text('nhentaiTagSuggestions'.tr),
+                            const Icon(Icons.rate_review_outlined),
+                          ],
+                        ),
+                      ),
                   ];
                 },
                 onSelected: (value) {
@@ -210,6 +223,9 @@ class DetailsPage extends StatelessWidget with Scroll2TopPageMixin {
                   }
                   if (value == 6) {
                     logic.handleResetReadProgress();
+                  }
+                  if (value == 7) {
+                    logic.showNhentaiTagSuggestions();
                   }
                 },
               );
@@ -1019,6 +1035,12 @@ class DetailsPage extends StatelessWidget with Scroll2TopPageMixin {
                 _buildTorrentButton(context),
                 // _buildStatisticButton(context),
               ]);
+            } else if (state.galleryUrl.isNH &&
+                logic.hasNhentaiOfficialApi) {
+              actions.addAll([
+                _buildArchiveButton(context),
+                _buildTorrentButton(context),
+              ]);
             }
 
             return ListView(
@@ -1583,8 +1605,20 @@ class DetailsPage extends StatelessWidget with Scroll2TopPageMixin {
                   ),
                   forceNewRoute: true,
                 ),
-        onSecondaryTap: state.galleryUrl.isNH || state.galleryUrl.isWN ? null : logic.showTagDialog,
-        onLongPress: state.galleryUrl.isNH || state.galleryUrl.isWN ? null : logic.showTagDialog,
+        onSecondaryTap: state.galleryUrl.isNH
+            ? (logic.hasNhentaiOfficialApi
+                ? logic.toggleNhentaiBlacklistTag
+                : null)
+            : state.galleryUrl.isWN
+                ? null
+                : logic.showTagDialog,
+        onLongPress: state.galleryUrl.isNH
+            ? (logic.hasNhentaiOfficialApi
+                ? logic.toggleNhentaiBlacklistTag
+                : null)
+            : state.galleryUrl.isWN
+                ? null
+                : logic.showTagDialog,
         showTagStatus: preferenceSetting.showGalleryTagVoteStatus.isTrue,
       );
 
@@ -1612,6 +1646,19 @@ class DetailsPage extends StatelessWidget with Scroll2TopPageMixin {
         );
       }
 
+      if (tag.nhentaiBlacklisted) {
+        return Stack(
+          children: [
+            Opacity(opacity: 0.55, child: tagWidget),
+            const Positioned(
+              top: 0,
+              right: 0,
+              child: Icon(Icons.block, size: 13, color: Colors.red),
+            ),
+          ],
+        );
+      }
+
       return tagWidget;
     }).toList();
   }
@@ -1623,11 +1670,13 @@ class DetailsPage extends StatelessWidget with Scroll2TopPageMixin {
         global: false,
         init: logic,
         builder: (_) {
-          if (state.galleryDetails == null || state.galleryUrl.isNH || state.galleryUrl.isWN) {
+          if (state.galleryDetails == null ||
+              state.galleryUrl.isWN ||
+              (state.galleryUrl.isNH && !logic.hasNhentaiOfficialApi)) {
             return const SizedBox();
           }
 
-          bool disableButtons =
+          bool disableButtons = state.galleryUrl.isNH ||
               state.galleryDetails!.comments.any((comment) => comment.fromMe);
 
           return Column(
@@ -1637,18 +1686,20 @@ class DetailsPage extends StatelessWidget with Scroll2TopPageMixin {
                 child: Align(
                   alignment: Alignment.centerRight,
                   child: TextButton(
-                    onPressed: () => toRoute(Routes.comment,
-                        arguments: state.galleryDetails!.comments),
-                    child: Text(state.galleryDetails!.comments.isEmpty
-                        ? 'noComments'.tr
-                        : 'allComments'.tr),
+                    onPressed: logic.openCommentsPage,
+                    child: Text(
+                      state.galleryDetails!.comments.isEmpty
+                          ? 'noComments'.tr
+                          : state.galleryUrl.isNH
+                              ? '${'allComments'.tr} (${state.galleryDetails!.commentCount})'
+                              : 'allComments'.tr,
+                    ),
                   ),
                 ),
               ),
               if (state.galleryDetails!.comments.isNotEmpty)
                 GestureDetector(
-                  onTap: () => toRoute(Routes.comment,
-                      arguments: state.galleryDetails!.comments),
+                  onTap: logic.openCommentsPage,
                   child: SizedBox(
                     height: UIConfig.detailsPageCommentsRegionHeight,
                     child: ListView.builder(

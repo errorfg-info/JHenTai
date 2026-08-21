@@ -11,13 +11,16 @@ import 'package:jhentai/src/enum/config_enum.dart';
 import 'package:jhentai/src/l18n/locale_text.dart';
 import 'package:jhentai/src/model/komga/komga_browse_models.dart';
 import 'package:jhentai/src/model/komga/komga_models.dart';
+import 'package:jhentai/src/model/reader_source.dart';
 import 'package:jhentai/src/network/komga_client.dart';
 import 'package:jhentai/src/pages/komga/komga_page.dart';
+import 'package:jhentai/src/pages/layout/mobile_v2/mobile_layout_page_v2.dart';
 import 'package:jhentai/src/service/local_config_service.dart';
 import 'package:jhentai/src/service/log.dart';
 import 'package:jhentai/src/service/read_progress_service.dart';
 import 'package:jhentai/src/service/sync_service.dart';
 import 'package:jhentai/src/setting/komga_setting.dart';
+import 'package:jhentai/src/widget/reader_source_switcher.dart';
 
 class _FakeKomgaClient extends KomgaClient {
   _FakeKomgaClient()
@@ -435,6 +438,31 @@ void main() {
     await tester.tap(find.byIcon(Icons.menu));
     await _pumpFrames(tester);
     expect(find.byType(Drawer), findsOneWidget);
+    expect(find.byType(EHUserAvatar), findsOneWidget);
+    for (final String destination in <String>[
+      'home',
+      'search',
+      'popular',
+      'ranklist',
+      'favorite',
+      'watched',
+      'history',
+      'download',
+      'setting',
+    ]) {
+      expect(
+        find.byKey(ValueKey<String>('readerMenu:$destination')),
+        findsOneWidget,
+      );
+    }
+    final ReaderSourceSwitcher sourceSwitcher = tester
+        .widget<ReaderSourceSwitcher>(find.byType(ReaderSourceSwitcher));
+    expect(sourceSwitcher.currentSource, ReaderSourceType.komga);
+    expect(find.text('Komga 设置'), findsNothing);
+    expect(
+      find.byKey(const ValueKey<String>('komgaSettingsButton')),
+      findsOneWidget,
+    );
 
     await tester.binding.handlePopRoute();
     await _pumpFrames(tester);
@@ -491,18 +519,20 @@ void main() {
     expect(find.text('Charlie New'), findsOneWidget);
   });
 
-  testWidgets('dark browse toolbar uses the scaffold background color', (
+  testWidgets('dark browse toolbar does not paint a background rectangle', (
     WidgetTester tester,
   ) async {
     final _FakeKomgaClient client = _FakeKomgaClient();
-    const Color scaffoldColor = Color(0xFF101016);
-    final ThemeData darkTheme = ThemeData(
+    const Color appSurfaceColor = Color(0xFF101016);
+    const Color scaffoldTrapColor = Color(0xFF292630);
+    final ColorScheme colorScheme = ColorScheme.fromSeed(
+      seedColor: Colors.deepPurple,
       brightness: Brightness.dark,
-      scaffoldBackgroundColor: scaffoldColor,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: Colors.deepPurple,
-        brightness: Brightness.dark,
-      ),
+    ).copyWith(surface: appSurfaceColor);
+    final ThemeData darkTheme = ThemeData(
+      useMaterial3: true,
+      colorScheme: colorScheme,
+      scaffoldBackgroundColor: scaffoldTrapColor,
     );
     await tester.binding.setSurfaceSize(const Size(1280, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -520,13 +550,62 @@ void main() {
     await tester.tap(find.text('Manga'));
     await _pumpFrames(tester);
 
+    final Scaffold scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
     final Material toolbar = tester.widget<Material>(
       find.byKey(const ValueKey<String>('komgaBrowseToolbar')),
     );
     final BuildContext scaffoldContext = tester.element(find.byType(Scaffold));
     expect(Theme.of(scaffoldContext).brightness, Brightness.dark);
-    expect(toolbar.color, Theme.of(scaffoldContext).scaffoldBackgroundColor);
-    expect(toolbar.color, scaffoldColor);
+    expect(
+      Theme.of(scaffoldContext).scaffoldBackgroundColor,
+      scaffoldTrapColor,
+    );
+    expect(scaffold.backgroundColor, appSurfaceColor);
+    expect(toolbar.type, MaterialType.transparency);
+  });
+
+  testWidgets('light browse toolbar is transparent over the app surface', (
+    WidgetTester tester,
+  ) async {
+    final _FakeKomgaClient client = _FakeKomgaClient();
+    const Color appSurfaceColor = Color(0xFFF9F7FF);
+    const Color scaffoldTrapColor = Color(0xFFE1DDE8);
+    final ColorScheme colorScheme = ColorScheme.fromSeed(
+      seedColor: Colors.deepPurple,
+      brightness: Brightness.light,
+    ).copyWith(surface: appSurfaceColor);
+    final ThemeData lightTheme = ThemeData(
+      useMaterial3: true,
+      colorScheme: colorScheme,
+      scaffoldBackgroundColor: scaffoldTrapColor,
+    );
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      GetMaterialApp(
+        translations: LocaleText(),
+        locale: const Locale('zh', 'CN'),
+        theme: lightTheme,
+        home: KomgaPage(clientFactory: () => client),
+      ),
+    );
+    await _pumpFrames(tester);
+    await tester.tap(find.text('Manga'));
+    await _pumpFrames(tester);
+
+    final Scaffold scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
+    final Material toolbar = tester.widget<Material>(
+      find.byKey(const ValueKey<String>('komgaBrowseToolbar')),
+    );
+    final BuildContext scaffoldContext = tester.element(find.byType(Scaffold));
+    expect(Theme.of(scaffoldContext).brightness, Brightness.light);
+    expect(
+      Theme.of(scaffoldContext).scaffoldBackgroundColor,
+      scaffoldTrapColor,
+    );
+    expect(scaffold.backgroundColor, appSurfaceColor);
+    expect(toolbar.type, MaterialType.transparency);
   });
 
   testWidgets('pull-to-refresh forces cloud progress sync before reloading', (
